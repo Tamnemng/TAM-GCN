@@ -346,3 +346,16 @@ class Model(nn.Module):
         x = self.drop_out(x)
 
         return self.fc(x)
+    
+    def extract_feature(self, x):
+        N, C, T, V, M = x.size()
+        x = x.permute(0, 4, 3, 1, 2).contiguous()
+        x = x.view(N * M, V * C, T)
+        x = self.data_bn(x)
+        x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous().view(N * M, C, T, V)
+        for i in range(len(self.backbone)):
+            x = self.backbone[i](x)
+        NM, C_new, T_new, V_new = x.size()
+        x = x.view(N, M, C_new, T_new, V_new)
+        x = x.permute(0, 2, 3, 4, 1).contiguous()
+        return x, x
