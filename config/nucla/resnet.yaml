@@ -1,6 +1,6 @@
 work_dir: ./work_dir/nucla/resnet_only
 
-feeder: feeder.feeder_rgb_only.Feeder
+feeder: feeder.feeder_nucla_resnet.Feeder
 train_feeder_args:
   rgb_path: /path/to/your/st-roi-train-image
   label_path: train

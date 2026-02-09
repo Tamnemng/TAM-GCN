@@ -9,6 +9,7 @@ from PIL import Image
 import torch
 from torchvision import transforms
 from torch.utils.data import Dataset
+import rarfile
 
 class Feeder(Dataset):
     def __init__(self, data_path, label_path, repeat=1, random_choose=False, random_shift=False, random_move=False,
