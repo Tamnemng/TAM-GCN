@@ -7,3 +7,6 @@ imageio
 scikit-video
 torch
 torchvision
+opencv-python
+ultralytics
+rarfile
