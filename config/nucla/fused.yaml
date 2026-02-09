@@ -1,11 +1,6 @@
 work_dir: ../../data/st-gcn_nucla/123/with_rgb/rgb_tp15_tf5_
-weights: models/nucla/123/rgb_fused_model.pt
 
-skeleton_joints_pkl: results/nucla/123/joint_result_msg3d.pkl
-skeleton_bones_pkl: results/nucla/123/bone_result_msg3d.pkl
-
-# feeder
-feeder: feeder.feeder_nucla_gcn.Feeder
+feeder: feeder.feeder_fusion.Feeder
 test_feeder_args:
   centralization: False
   temporal_rgb_frames: 5
@@ -27,7 +22,7 @@ model_args:
 phase: test
 temporal_positions: 15
 fix_weights: True
-joint_weights: results/nucla/CTROGC-GCN.pt
+joint_weights: ./results/nucla/CTROGC-GCN.pt
 device: [0]
 
 # debug
