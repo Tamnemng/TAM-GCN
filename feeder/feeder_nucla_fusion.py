@@ -35,33 +35,43 @@ class Feeder(Dataset):
 
     def load_one_skeleton_file(self, file_path):
         """
-        Hàm đọc 1 file skeleton lẻ và chuyển về numpy array shape (C, T, V, M)
+        Hàm sửa lỗi: Đọc JSON cấu trúc 'skeletons' và chuyển về shape (C, T, V, M)
         """
         try:
-            # Ví dụ: Đọc file JSON
             with open(file_path, 'r') as f:
                 video_info = json.load(f)
-            frames = video_info['data']
-            T = len(frames)
-            V = 20
-            M = 1
             
-            data_numpy = np.zeros((3, T, V, M))
+            # 1. SỬA KEY: Dùng 'skeletons' thay vì 'data'
+            if 'skeletons' in video_info:
+                # Dữ liệu gốc shape: (T, V, C) hoặc (T, V*C) tùy file, nhưng thường là list tọa độ
+                skeletons_data = np.array(video_info['skeletons']) 
+            elif 'data' in video_info:
+                # Fallback nếu file json có cấu trúc cũ
+                skeletons_data = np.array(video_info['data'])
+            else:
+                raise KeyError("File JSON không có key 'skeletons' hoặc 'data'")
+
+            # 2. XỬ LÝ SHAPE: Chuyển về (C, T, V, M)
+            # Giả sử skeletons_data đang là (T, 20, 3) hoặc (T, 60)
+            if len(skeletons_data.shape) == 2:
+                # Nếu shape là (T, 60) -> Reshape thành (T, 20, 3)
+                T, _ = skeletons_data.shape
+                skeletons_data = skeletons_data.reshape(T, 20, 3)
             
-            for t, frame in enumerate(frames):
-                if len(frame['skeleton']) > 0:
-                    pose = frame['skeleton'][0]
-                    for v in range(V):
-                        idx = v * 3
-                        if idx + 2 < len(pose):
-                            data_numpy[0, t, v, 0] = pose[idx]     # x
-                            data_numpy[1, t, v, 0] = pose[idx+1]   # y
-                            data_numpy[2, t, v, 0] = pose[idx+2]   # z (score)
-                            
+            # skeletons_data lúc này là (T, V, C) = (T, 20, 3)
+            # Cần chuyển thành (C, T, V, M) với M=1
+            
+            # (T, V, C) -> (C, T, V)
+            data_numpy = skeletons_data.transpose(2, 0, 1) 
+            
+            # (C, T, V) -> (C, T, V, M)
+            data_numpy = np.expand_dims(data_numpy, axis=-1)
+
             return data_numpy
 
         except Exception as e:
             print(f"Lỗi đọc skeleton file {file_path}: {e}")
+            # Trả về mỗ hình rỗng để code không crash, nhưng sẽ đen xì
             return np.zeros((3, 50, 20, 1))
 
     def __len__(self):

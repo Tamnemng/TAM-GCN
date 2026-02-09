@@ -50,6 +50,7 @@ def visualize_fusion_effect(dataset_path, weights_path=None):
         num_class=10, # UCLA có 10 class
         num_point=20, 
         num_person=1,
+        graph='graph.ucla.Graph',
         graph_args=graph_args,
         in_channels=3
     ).to(device)
@@ -164,6 +165,10 @@ def visualize_fusion_effect(dataset_path, weights_path=None):
     plt.show()
 
 if __name__ == '__main__':
-    WEIGHTS_PATH = './result/nucla/resnet.pt' 
+    # ĐƯỜNG DẪN WEIGHTS (Quan trọng)
+    # Bạn hãy thay thế đường dẫn này bằng đường dẫn file .pt của CTR-GCN đã train
+    # Ví dụ: './work_dir/nucla/ctrgcn/runs-50.pt'
+    # Nếu không có, để None (sẽ dùng weight ngẫu nhiên -> heatmap sẽ trông như nhiễu TV)
+    WEIGHTS_PATH = './result/nucla/CTROGC-GCN.pt' 
     
     visualize_fusion_effect('./data/nucla/', WEIGHTS_PATH)
