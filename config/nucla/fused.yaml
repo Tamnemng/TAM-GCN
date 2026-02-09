@@ -1,0 +1,34 @@
+work_dir: ../../data/st-gcn_nucla/123/with_rgb/rgb_tp15_tf5_
+weights: models/nucla/123/rgb_fused_model.pt
+
+skeleton_joints_pkl: results/nucla/123/joint_result_msg3d.pkl
+skeleton_bones_pkl: results/nucla/123/bone_result_msg3d.pkl
+
+# feeder
+feeder: feeder.feeder_nucla_gcn.Feeder
+test_feeder_args:
+  centralization: False
+  temporal_rgb_frames: 5
+  data_path: ../../data/NWestern_UCLA/123/val_data_joint.npy
+  label_path: ../../data/NWestern_UCLA/123/val_label.pkl
+
+# model
+model: models.mmn_ctrgcn.MMNet_CTRGCN
+model_args:
+  in_channels: 3
+  num_class: 10
+  dropout: 0.5
+  edge_importance_weighting: True
+  graph_args:
+    layout: 'ucla'
+    strategy: 'spatial'
+
+# test
+phase: test
+temporal_positions: 15
+fix_weights: True
+joint_weights: results/nucla/CTROGC-GCN.pt
+device: [0]
+
+# debug
+debug: False

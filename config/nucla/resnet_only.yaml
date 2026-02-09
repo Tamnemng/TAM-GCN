@@ -12,7 +12,7 @@ test_feeder_args:
   label_path: val
   temporal_rgb_frames: 5
 
-model: net.resnet_only.Model
+model: models.resnet_only.Model
 model_args:
   num_class: 10
   pretrained: True
