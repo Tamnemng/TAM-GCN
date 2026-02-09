@@ -1,6 +1,8 @@
 import numpy as np
 import random
-
+from torchvision import transforms
+import os
+from PIL import Image
 def centralization(data_numpy): # Bruce
     C, T, V, M = data_numpy.shape
     for t in range(T):
@@ -213,19 +215,31 @@ def calculate_recall_precision(label, score):
 
 def load_rgb_images(rgb_root, name, temporal_rgb_frames, size=224):
     """
-    Hàm load ảnh RGB.
-    Vì visualize cần chạy ngay mà có thể bạn chưa có đủ data ảnh,
-    hàm này sẽ cố gắng load ảnh, nếu lỗi thì trả về ảnh đen để code không crash.
+    Hàm load ảnh thật từ file .png hoặc .jpg
     """
+    transform = transforms.Compose([
+        transforms.Resize((size, size)),
+        transforms.ToTensor(),
+    ])
+    img_path = os.path.join(rgb_root, name + '.png')
+    if not os.path.exists(img_path):
+        img_path = os.path.join(rgb_root, name + '.jpg')
+
     img_list = []
     
     try:
-        for i in range(temporal_rgb_frames):
-            img = np.zeros((3, size, size), dtype=np.float32) 
-            img_list.append(img)
-        output = np.concatenate(img_list, axis=0)
-        return output
+        if os.path.exists(img_path):
+            img = Image.open(img_path).convert('RGB')
+            img_tensor = transform(img)
+            img_numpy = img_tensor.numpy()
+            for i in range(temporal_rgb_frames):
+                img_list.append(img_numpy)
+            output = np.concatenate(img_list, axis=0)
+            return output
+        else:
+            print(f"!!! Cảnh báo: Không tìm thấy ảnh tại {img_path}")
+            raise FileNotFoundError(img_path)
 
     except Exception as e:
-        print(f"Lỗi load ảnh: {e}. Trả về ảnh đen.")
+        print(f"Lỗi load ảnh {name}: {e}. Dùng ảnh đen thay thế.")
         return np.zeros((3 * temporal_rgb_frames, size, size)).astype(np.float32)
