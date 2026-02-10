@@ -2,13 +2,13 @@ work_dir: ./work_dir/nucla/resnet_only
 
 feeder: feeder.feeder_nucla_resnet.Feeder
 train_feeder_args:
-  rgb_path: /path/to/your/st-roi-train-image
+  rgb_path: ../drive/MyDrive/Data/ucla_stroi_weighted
   label_path: train
   random_flip: True
   temporal_rgb_frames: 5
 
 test_feeder_args:
-  rgb_path: /path/to/your/st-roi-test-image
+  rgb_path: ../drive/MyDrive/Data/ucla_stroi_weighted
   label_path: val
   temporal_rgb_frames: 5
 
