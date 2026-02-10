@@ -11,8 +11,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from models.ctrgcn import Model as CTRGCN
 
 WEIGHTS_PATH = './result/nucla/CTROGC-GCN.pt'
-INPUT_RGB_PATH = '/ucla_stroi/'
-OUTPUT_PATH = '/ucla_stroi_weighted/'
+INPUT_RGB_PATH = '../drive/MyDrive/Data/ucla_fivefs'
+OUTPUT_PATH = './ucla_stroi_weighted/'
 
 MODEL_NUM_CLASS = 10
 MODEL_NUM_POINT = 20
