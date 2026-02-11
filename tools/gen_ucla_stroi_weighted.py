@@ -7,7 +7,7 @@ from tqdm import tqdm
 from PIL import Image
 
 sys.path.append(os.getcwd())
-from models.ctrgcn import Model as CTRGCN
+from models.stgcn import Model as STGCN
 from feeder.feeder_nucla_fusion import Feeder
 
 output_device = 0 if torch.cuda.is_available() else 'cpu'
@@ -25,7 +25,7 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
     Tạo ảnh FiveFS có trọng số từ ảnh FiveFS gốc.
     
     Quy trình:
-    1. Load skeleton data qua Feeder → đưa vào CTR-GCN để extract feature importance
+    1. Load skeleton data qua Feeder → đưa vào ST-GCN để extract feature importance
     2. Load ảnh FiveFS gốc đã tạo bởi gen_ucla_stroi.py
     3. Tính trọng số cho mỗi body part dựa trên feature importance
     4. Nhân trọng số vào từng vùng body part tương ứng trên ảnh
@@ -34,16 +34,17 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
     if not os.path.exists(output_path):
         os.makedirs(output_path)
 
-    # --- Khởi tạo mô hình CTR-GCN ---
-    print(">>> Đang khởi tạo mô hình CTR-GCN...")
+    # --- Khởi tạo mô hình ST-GCN ---
+    print(">>> Đang khởi tạo mô hình ST-GCN...")
     graph_args = {'labeling_mode': 'spatial'}
-    model_ske = CTRGCN(
+    model_ske = STGCN(
+        in_channels=3,
         num_class=10, 
         num_point=20, 
         num_person=1,
         graph='graph.ucla.Graph',
         graph_args=graph_args,
-        in_channels=3
+        edge_importance_weighting=True
     ).to(device)
 
     if weights_path and os.path.exists(weights_path):
@@ -177,7 +178,7 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
 
 
 if __name__ == '__main__':
-    WEIGHTS_PATH = './result/nucla/CTROGC-GCN.pt' 
+    WEIGHTS_PATH = './result/nucla/ST-GCN.pt' 
     INPUT_FIVEFS_PATH = '../drive/MyDrive/Data/ucla_fivefs'       # Đường dẫn tới ảnh FiveFS gốc (output của gen_ucla_stroi.py)
     OUTPUT_PATH = './ucla_stroi_weighted/'     # Đường dẫn lưu ảnh weighted
     
