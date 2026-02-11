@@ -54,12 +54,15 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
             print(f"!!! Cảnh báo: Không load được weights ({e}). Dùng weights ngẫu nhiên.")
     else:
         print("!!! Cảnh báo: Không tìm thấy weights path. Đang chạy với weights ngẫu nhiên.")
+        print("!!! Weights ngẫu nhiên sẽ cho kết quả importance vô nghĩa!")
 
     model_ske.eval()
 
     splits = ['train', 'val']
     total_count = 0
     skip_count = 0
+    debug_count = 0  # Đếm số sample đã in debug
+    DEBUG_LIMIT = 5  # Chỉ in debug cho 5 sample đầu
     
     for split in splits:
         print(f"\n>>> Đang xử lý tập dữ liệu: {split}")
@@ -131,15 +134,21 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
                     top_k_vals = np.partition(feature_val, -k)[-k:]
                     weights_per_part[j] = top_k_vals.mean()
             
-            # Normalize trọng số về khoảng [0.3, 1.0]
-            # - Body part quan trọng nhất → giữ nguyên brightness (1.0)
-            # - Body part ít quan trọng → giảm brightness (0.3)
-            # → Không có giá trị > 1.0 nên không bị clip mất thông tin
+            # Normalize trọng số về khoảng [0.5, 1.5]
+            # - Body part quan trọng nhất → tăng sáng 50% (1.5)
+            # - Body part ít quan trọng → giảm sáng 50% (0.5)
+            # → Vừa enhance phần quan trọng, vừa giảm phần không quan trọng
             w_min, w_max = weights_per_part.min(), weights_per_part.max()
             if (w_max - w_min) > 0:
-                weights_per_part = 0.3 + 0.7 * (weights_per_part - w_min) / (w_max - w_min)
+                weights_per_part = 0.5 + 1.0 * (weights_per_part - w_min) / (w_max - w_min)
             else:
                 weights_per_part = np.ones(NUM_BODY_PARTS)
+            
+            # Debug logging cho vài sample đầu
+            if debug_count < DEBUG_LIMIT:
+                parts_names = ['head', 'l_hand', 'r_hand', 'l_leg', 'r_leg']
+                print(f"  [DEBUG] {file_name}: weights = {dict(zip(parts_names, [f'{w:.3f}' for w in weights_per_part]))}")
+                debug_count += 1
             
             # --- Apply trọng số lên từng vùng body part trong ảnh ---
             # Cấu trúc ảnh FiveFS:
