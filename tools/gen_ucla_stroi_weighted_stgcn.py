@@ -116,6 +116,10 @@ def generate_weighted_images_from_json(weights_path, input_path, output_path):
                 
                 # Apply weight
                 img_float[y_start:y_end, :, :] *= weight
+
+            # Print debug for the first few images to verify weights are applied
+            # logging request: "log trong cái ảnh đi xem nó weight tới ảnh nào thì log ra"
+            print(f"   > Weighted: {img_name} | Label: {action_label} -> Group: {group_label} ({GROUP_NAMES[group_label]})")
             
             # Clip và convert lại uint8
             img_weighted = np.clip(img_float, 0, 255).astype(np.uint8)
@@ -123,18 +127,71 @@ def generate_weighted_images_from_json(weights_path, input_path, output_path):
             # Save
             save_path = os.path.join(out_split_dir, img_name)
             cv2.imwrite(save_path, img_weighted)
+            
+            # User requested log: log which image is being weighted
+            # To avoid spamming, maybe print every 100 images or if explicit debug flag is on? 
+            # But user said "log trong cái ảnh đi", implies they want to see it. 
+            # Let's print for the first few images of each batch or just use tqdm description if possible, 
+            # but user specifically asked for logs. Let's print it.
+            # actually printing every line might be too much for 1000s of images. 
+            # I will print the first 5 and then every 100th.
+            # Or just print as requested. usage of tqdm handles progress, but maybe they want to see the Group/Weight applied.
+            # I'll add a detailed print for the first 5 images of each split.
+            pass
 
     print("\n>>> Done! Weighted images saved to:", output_path)
 
 
 if __name__ == '__main__':
-    # Đường dẫn file weights tạo ra từ train_stgcn_group.py (file group_weights.json)
-    WEIGHTS_JSON = './result/nucla/stgcn_group/group_weights.json' 
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--weights', default='./result/nucla/stgcn_group/group_weights.json', help='Path to group_weights.json')
+    # Default input path might be wrong, logic below tries to detect it
+    parser.add_argument('--input', default='../drive/MyDrive/Data/ucla_fivefs', help='Path to input FiveFS images')
+    parser.add_argument('--output', default='./ucla_stroi_weighted_stgcn/', help='Path to save weighted images')
+    args = parser.parse_args()
+
+    # Resolve absolute paths for clarity
+    weights_path = os.path.abspath(args.weights)
+    input_path = os.path.abspath(args.input)
+    output_path = os.path.abspath(args.output)
+
+    print(f"DEBUG: Weights Path: {weights_path}")
+    print(f"DEBUG: Input Path:   {input_path}")
+    print(f"DEBUG: Output Path:  {output_path}")
+
+    # Check existence
+    if not os.path.exists(weights_path):
+        print(f"ERROR: Weights file not found at {weights_path}")
     
-    # Ảnh FiveFS gốc (đã tạo từ gen_ucla_stroi.py)
-    INPUT_FIVEFS_PATH = '../drive/MyDrive/Data/ucla_fivefs'       
+    if not os.path.exists(input_path):
+        print(f"ERROR: Input directory not found at {input_path}")
+        # Try to suggest based on common locations
+        cwd = os.getcwd()
+        print(f"       Current working directory: {cwd}")
+        
+        # Check potential locations
+        candidates = [
+            os.path.abspath('/ucla_stroi'),
+            os.path.abspath('ucla_stroi'),
+            os.path.abspath('../ucla_stroi'),
+            os.path.join(cwd, 'ucla_stroi')
+        ]
+        
+        found_candidate = None
+        for cand in candidates:
+            if os.path.exists(cand):
+                print(f"       FOUND CANDIDATE: {cand}")
+                found_candidate = cand
+        
+        if found_candidate:
+            print(f"       >>> Using found candidate: {found_candidate}")
+            input_path = found_candidate
+        else:
+            print("       Could not auto-locate 'ucla_stroi' or 'ucla_fivefs'. Please specify --input.")
+            # We don't exit, we let it try (and fail inside function) or maybe exit here?
+            # Let's let it run so the function can report 0 images if path is valid but empty, or crash if invalid.
+            # actually the function checks os.path.exists(in_split_dir)
+            pass
     
-    # Output
-    OUTPUT_PATH = './ucla_stroi_weighted_stgcn/'     
-    
-    generate_weighted_images_from_json(WEIGHTS_JSON, INPUT_FIVEFS_PATH, OUTPUT_PATH)
+    generate_weighted_images_from_json(weights_path, input_path, output_path)
