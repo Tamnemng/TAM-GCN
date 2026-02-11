@@ -27,7 +27,7 @@ IN_CHANNELS = 3
 GRAPH = 'graph.ucla.Graph'
 GRAPH_ARGS = {'labeling_mode': 'spatial'}
 
-DATA_PATH = 'joint'
+DATA_PATH = '../drive/MyDrive/Data/Data/NW-UCLA-ALL/'
 BATCH_SIZE = 16
 TEST_BATCH_SIZE = 64
 NUM_EPOCHS = 80
