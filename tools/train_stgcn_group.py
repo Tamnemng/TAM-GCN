@@ -1,12 +1,16 @@
 """
-Standalone training script cho ST-GCN 4-group model.
-Không phụ thuộc vào processor framework phức tạp.
+Standalone training script cho ST-GCN model.
+Hỗ trợ 2 chế độ:
+  - Group mode (mặc định): 5-group classification
+  - No-group mode (--no-group): 10-label classification gốc
 
 Usage:
-    python tools/train_stgcn_group.py
+    python tools/train_stgcn_group.py              # Train 5 groups
+    python tools/train_stgcn_group.py --no-group    # Train 10 labels gốc
 """
 import sys
 import os
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,11 +20,9 @@ from tqdm import tqdm
 sys.path.append(os.getcwd())
 
 from models.stgcn import Model
-from feeder.feeder_nucla_group import Feeder, GROUP_NAMES
 
 # ============ CONFIG ============
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-NUM_CLASS = 5
 NUM_POINT = 20
 NUM_PERSON = 1
 IN_CHANNELS = 3
@@ -37,14 +39,60 @@ LR_DECAY = 0.1
 WEIGHT_DECAY = 0.0001
 WARM_UP_EPOCH = 5
 REPEAT_TRAIN = 5
-
-SAVE_DIR = './result/nucla/stgcn_group'
 # ================================
+
+# 10 label gốc (0-indexed) cho chế độ --no-group
+LABEL_NAMES_10 = {
+    0: 'Pick up with one hand',
+    1: 'Pick up with two hands',
+    2: 'Drop trash',
+    3: 'Walk around',
+    4: 'Sit down',
+    5: 'Stand up',
+    6: 'Donning',
+    7: 'Doffing',
+    8: 'Throw',
+    9: 'Carry',
+}
+
+
+class _SkeletonOnlyWrapper(torch.utils.data.Dataset):
+    """Wrap feeder_nucla_gcn (trả 4 giá trị) thành 3 giá trị (data, label, index)."""
+    def __init__(self, feeder):
+        self.feeder = feeder
+    def __len__(self):
+        return len(self.feeder)
+    def __getitem__(self, index):
+        data, _rgb, label, idx = self.feeder[index]
+        return data, label, idx
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='ST-GCN Training (Group / No-Group)')
+    parser.add_argument('--no-group', action='store_true',
+                        help='Train với 10 label gốc thay vì 5 groups')
+    return parser.parse_args()
 
 
 def main():
+    args = parse_args()
+    
+    # Chọn chế độ training
+    if args.no_group:
+        NUM_CLASS = 10
+        SAVE_DIR = './result/nucla/stgcn_no_group'
+        from feeder.feeder_nucla_gcn import Feeder as OrigFeeder
+        CLASS_NAMES = LABEL_NAMES_10
+        mode_name = '10-Label (No Group)'
+    else:
+        NUM_CLASS = 5
+        SAVE_DIR = './result/nucla/stgcn_group'
+        from feeder.feeder_nucla_group import Feeder as GroupFeeder, GROUP_NAMES
+        CLASS_NAMES = GROUP_NAMES
+        mode_name = '5-Group'
+    
     print("=" * 60)
-    print("ST-GCN 4-Group Training")
+    print(f"ST-GCN {mode_name} Training")
     print("=" * 60)
     
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -66,27 +114,51 @@ def main():
     
     # Data
     print("\n>>> Loading data...")
-    train_dataset = Feeder(
-        data_path=DATA_PATH,
-        label_path='train',
-        repeat=REPEAT_TRAIN,
-        random_choose=True,
-        random_shift=False,
-        random_move=False,
-        window_size=52,
-        normalization=False
-    )
-    
-    test_dataset = Feeder(
-        data_path=DATA_PATH,
-        label_path='val',
-        repeat=1,
-        random_choose=False,
-        random_shift=False,
-        random_move=False,
-        window_size=52,
-        normalization=False
-    )
+    if args.no_group:
+        # Dùng feeder gốc, wrap lại để chỉ trả 3 giá trị (data, label, index)
+        train_dataset = _SkeletonOnlyWrapper(OrigFeeder(
+            data_path=DATA_PATH,
+            label_path='train',
+            repeat=REPEAT_TRAIN,
+            random_choose=True,
+            random_shift=False,
+            random_move=False,
+            window_size=52,
+            normalization=False
+        ))
+        
+        test_dataset = _SkeletonOnlyWrapper(OrigFeeder(
+            data_path=DATA_PATH,
+            label_path='val',
+            repeat=1,
+            random_choose=False,
+            random_shift=False,
+            random_move=False,
+            window_size=52,
+            normalization=False
+        ))
+    else:
+        train_dataset = GroupFeeder(
+            data_path=DATA_PATH,
+            label_path='train',
+            repeat=REPEAT_TRAIN,
+            random_choose=True,
+            random_shift=False,
+            random_move=False,
+            window_size=52,
+            normalization=False
+        )
+        
+        test_dataset = GroupFeeder(
+            data_path=DATA_PATH,
+            label_path='val',
+            repeat=1,
+            random_choose=False,
+            random_shift=False,
+            random_move=False,
+            window_size=52,
+            normalization=False
+        )
     
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True, 
@@ -149,8 +221,8 @@ def main():
         model.eval()
         test_correct = 0
         test_total = 0
-        group_correct = {g: 0 for g in range(NUM_CLASS)}
-        group_total = {g: 0 for g in range(NUM_CLASS)}
+        class_correct = {g: 0 for g in range(NUM_CLASS)}
+        class_total = {g: 0 for g in range(NUM_CLASS)}
         
         with torch.no_grad():
             for data, label, _ in test_loader:
@@ -164,8 +236,8 @@ def main():
                 
                 for g in range(NUM_CLASS):
                     mask = label == g
-                    group_correct[g] += (pred[mask] == label[mask]).sum().item()
-                    group_total[g] += mask.sum().item()
+                    class_correct[g] += (pred[mask] == label[mask]).sum().item()
+                    class_total[g] += mask.sum().item()
         
         test_acc = test_correct / test_total
         
@@ -177,8 +249,10 @@ def main():
         print(f'\nEpoch {epoch+1}: loss={np.mean(train_loss):.4f}, '
               f'train_acc={train_acc*100:.1f}%, test_acc={test_acc*100:.1f}%, lr={lr:.5f}')
         for g in range(NUM_CLASS):
-            g_acc = group_correct[g] / max(group_total[g], 1) * 100
-            print(f'  Group {g} ({GROUP_NAMES[g]}): {g_acc:.1f}% ({group_correct[g]}/{group_total[g]})')
+            g_acc = class_correct[g] / max(class_total[g], 1) * 100
+            name = CLASS_NAMES[g]
+            label_type = 'Label' if args.no_group else 'Group'
+            print(f'  {label_type} {g} ({name}): {g_acc:.1f}% ({class_correct[g]}/{class_total[g]})')
         
         # Save best
         if test_acc > best_acc:
@@ -205,7 +279,7 @@ def main():
     
     # Store gradients per group
     # group_grads[g][part] = list of gradients
-    group_grads = {g: {p: [] for p in TARGET_JOINTS.keys()} for g in range(NUM_CLASS)}
+    class_grads = {g: {p: [] for p in TARGET_JOINTS.keys()} for g in range(NUM_CLASS)}
     
     # Enable gradients on input for analysis
     # We need to run forward pass on a subset of data
@@ -244,39 +318,42 @@ def main():
                 for part, joints in TARGET_JOINTS.items():
                     # Average gradient of joints in this part
                     part_grad = np.mean([grad[i, j] for j in joints])
-                    group_grads[g][part].append(part_grad)
+                    class_grads[g][part].append(part_grad)
                 analyzed_count[g] += 1
     
-    # Compute average importance per group
-    final_group_weights = {}
+    # Compute average importance per class
+    final_class_weights = {}
     
-    print("\n>>> Per-Group Body Part Importance:")
+    label_type = 'Label' if args.no_group else 'Group'
+    print(f"\n>>> Per-{label_type} Body Part Importance:")
     for g in range(NUM_CLASS):
-        print(f"\nGroup {g}: {GROUP_NAMES[g]}")
+        name = CLASS_NAMES[g]
+        print(f"\n{label_type} {g}: {name}")
         avg_grads = {}
         for part in TARGET_JOINTS.keys():
-            if len(group_grads[g][part]) > 0:
-                avg_grads[part] = np.mean(group_grads[g][part])
+            if len(class_grads[g][part]) > 0:
+                avg_grads[part] = np.mean(class_grads[g][part])
             else:
                 avg_grads[part] = 0.0
         
-        # Normalize to max 1.0 per group
+        # Normalize to max 1.0 per class
         max_val = max(avg_grads.values()) if avg_grads else 1.0
         if max_val == 0: max_val = 1.0
         
-        final_group_weights[g] = {}
+        final_class_weights[g] = {}
         for part, val in avg_grads.items():
             norm_val = val / max_val
-            final_group_weights[g][part] = float(norm_val)
+            final_class_weights[g][part] = float(norm_val)
             bar = '█' * int(norm_val * 20)
             print(f"  {part:>8s}: {norm_val:.4f} {bar}")
 
     # Save to JSON
     import json
-    weights_path = os.path.join(SAVE_DIR, 'group_weights.json')
+    weights_filename = 'label_weights.json' if args.no_group else 'group_weights.json'
+    weights_path = os.path.join(SAVE_DIR, weights_filename)
     with open(weights_path, 'w') as f:
-        json.dump(final_group_weights, f, indent=2)
-    print(f"\n>>> Saved group weights to: {weights_path}")
+        json.dump(final_class_weights, f, indent=2)
+    print(f"\n>>> Saved weights to: {weights_path}")
     print(">>> Dùng file này cho gen_ucla_stroi_weighted_stgcn.py")
 
 
