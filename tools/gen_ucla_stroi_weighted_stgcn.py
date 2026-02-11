@@ -4,21 +4,31 @@ Thay vì extract feature từng sample (gây noise), script này dùng weights T
 đã được học từ Edge Importance của ST-GCN.
 
 Flow:
-1. Load body_part_weights.json (được tạo bởi tools/train_stgcn_group.py)
-   Format: {"head": 1.2, "l_hand": 0.8, ...}
-2. Load ảnh FiveFS gốc
-3. Apply weights lên từng vùng ảnh tương ứng với body part
+1. Load group_weights.json (được tạo bởi tools/train_stgcn_group.py)
+   Format: {"0": {"head": 1.2, ...}, "1": {...}}
+2. Load danh sách ảnh FiveFS và labels
+3. Với mỗi ảnh:
+   - Xác định label (action class) của ảnh đó
+   - Map label -> group (dùng LABEL_TO_GROUP)
+   - Lấy weights tương ứng với group đó
+   - Apply weights lên 5 vùng body part
 4. Lưu ảnh mới
 
 Lợi ích:
-- Weights nhất quán, không bị noise theo từng sample
-- Phản ánh đúng độ quan trọng GLOBAL của từng body part đối với việc phân loại action
+- Weights ĐẶC THÙ cho từng nhóm hành động (vd: Group 1 pick up -> sáng tay, Group 0 walk -> sáng chân)
+- Nhất quán trong cùng 1 nhóm, không bị noise
 """
 import os
 import cv2
 import numpy as np
 import json
+import re
 from tqdm import tqdm
+
+# Import mapping từ feeder
+import sys
+sys.path.append(os.getcwd())
+from feeder.feeder_nucla_group import LABEL_TO_GROUP, GROUP_NAMES
 
 def generate_weighted_images_from_json(weights_path, input_path, output_path):
     print("=" * 60)
@@ -32,28 +42,34 @@ def generate_weighted_images_from_json(weights_path, input_path, output_path):
         return
 
     with open(weights_path, 'r') as f:
-        body_part_weights = json.load(f)
+        group_weights = json.load(f)
     
-    print(">>> Loaded Body Part Weights:")
-    for part, w in body_part_weights.items():
-        print(f"  {part:>8s}: {w:.4f}")
+    print(">>> Loaded Group Weights:")
+    for g, weights in group_weights.items():
+        print(f"  Group {g} ({GROUP_NAMES[int(g)]}): {weights}")
         
-    # Chuẩn bị array weights theo thứ tự rows của ảnh FiveFS
+    # Chuẩn bị weight arrays cho từng group
     # Thứ tự rows: head, l_hand, r_hand, l_leg, r_leg
     parts_order = ['head', 'l_hand', 'r_hand', 'l_leg', 'r_leg']
-    weight_vals = np.array([body_part_weights[p] for p in parts_order])
     
-    # Normalize weights về [0.5, 1.5]
-    # (Optional: nếu weights từ ST-GCN đã OK thì có thể không cần normalize, 
-    #  nhưng để an toàn ta vẫn map về range này để tránh làm ảnh quá tối/sáng)
-    w_min, w_max = weight_vals.min(), weight_vals.max()
-    if (w_max - w_min) > 0:
-        weight_vals = 0.5 + 1.0 * (weight_vals - w_min) / (w_max - w_min)
-    else:
-        weight_vals = np.ones(5)
+    # Pre-compute weight arrays for each group
+    group_weight_arrays = {}
+    for g, weights in group_weights.items():
+        vals = np.array([weights[p] for p in parts_order])
         
-    print(f">>> Normalized Weights applied to images: {dict(zip(parts_order, weight_vals.round(3)))}")
+        # Normalize về [0.5, 1.5]
+        w_min, w_max = vals.min(), vals.max()
+        if (w_max - w_min) > 0:
+            vals = 0.5 + 1.0 * (vals - w_min) / (w_max - w_min)
+        else:
+            vals = np.ones(5)
+        
+        group_weight_arrays[int(g)] = vals
 
+    # Load data_list để biết label của từng file ảnh (từ feeder gốc hoặc logic parse filename)
+    # Filename format: a01_s01_e01_v01.png
+    # a01 -> action 1
+    
     # 2. Process images
     if not os.path.exists(output_path):
         os.makedirs(output_path)
@@ -76,8 +92,17 @@ def generate_weighted_images_from_json(weights_path, input_path, output_path):
             img_path = os.path.join(in_split_dir, img_name)
             img = cv2.imread(img_path)
             
-            if img is None:
+            # Parse extracted label from filename
+            # format: a10_s01_e01_v03....
+            match = re.search(r'a(\d+)_', img_name)
+            if not match:
                 continue
+            
+            action_label = int(match.group(1))
+            group_label = LABEL_TO_GROUP.get(action_label, 0)
+            
+            # Lấy weights tương ứng cho group này
+            current_weights = group_weight_arrays[group_label]
             
             h, w, c = img.shape
             # Ảnh FiveFS có 5 rows tương ứng 5 body parts
@@ -85,7 +110,7 @@ def generate_weighted_images_from_json(weights_path, input_path, output_path):
             
             img_float = img.astype(np.float32)
             
-            for i, weight in enumerate(weight_vals):
+            for i, weight in enumerate(current_weights):
                 y_start = i * part_h
                 y_end = (i + 1) * part_h if i < 4 else h
                 
@@ -103,8 +128,8 @@ def generate_weighted_images_from_json(weights_path, input_path, output_path):
 
 
 if __name__ == '__main__':
-    # Đường dẫn file weights tạo ra từ train_stgcn_group.py
-    WEIGHTS_JSON = './result/nucla/stgcn_group/body_part_weights.json' 
+    # Đường dẫn file weights tạo ra từ train_stgcn_group.py (file group_weights.json)
+    WEIGHTS_JSON = './result/nucla/stgcn_group/group_weights.json' 
     
     # Ảnh FiveFS gốc (đã tạo từ gen_ucla_stroi.py)
     INPUT_FIVEFS_PATH = '../drive/MyDrive/Data/ucla_fivefs'       

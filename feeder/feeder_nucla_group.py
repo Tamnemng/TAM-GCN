@@ -17,27 +17,34 @@ from collections import Counter
 from torch.utils.data import Dataset
 
 # Map từ original label (1-indexed) → group label (0-indexed)
+# Grouping based on OBJECT TYPE:
+# 0: None (Body only)
+# 1: Small Item (pick 1 hand, throw)
+# 2: Large/Heavy Item (pick 2 hands, carry)
+# 3: Trash (drop trash)
+# 4: Clothing (donning, doffing)
 LABEL_TO_GROUP = {
-    1: 1,   # pick up with one hand → Small Object
-    2: 1,   # pick up with two hands → Small Object 
-    3: 1,   # drop trash → Small Object
-    4: 0,   # walk around → Body Motion
-    5: 0,   # sit down → Body Motion
-    6: 0,   # stand up → Body Motion
-    7: 2,   # donning → Clothing
-    8: 2,   # doffing → Clothing
-    9: 1,   # throw → Small Object
-    10: 3,  # carry → Large Object
+    1: 1,   # pick up with one hand → Small Item
+    2: 2,   # pick up with two hands → Large Item
+    3: 3,   # drop trash → Trash
+    4: 0,   # walk around → None
+    5: 0,   # sit down → None
+    6: 0,   # stand up → None
+    7: 4,   # donning → Clothing
+    8: 4,   # doffing → Clothing
+    9: 1,   # throw → Small Item
+    10: 2,  # carry → Large Item
 }
 
 GROUP_NAMES = {
-    0: 'Body Motion (walk/sit/stand)',
-    1: 'Small Object (pick/drop/throw)',
-    2: 'Clothing (don/doff)',
-    3: 'Large Object (carry)',
+    0: 'None (walk/sit/stand)',
+    1: 'Small Item (pick 1h/throw)',
+    2: 'Large Item (pick 2h/carry)',
+    3: 'Trash (drop trash)',
+    4: 'Clothing (don/doff)',
 }
 
-NUM_GROUPS = 4
+NUM_GROUPS = 5
 
 
 class Feeder(Dataset):

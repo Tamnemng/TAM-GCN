@@ -20,7 +20,7 @@ from feeder.feeder_nucla_group import Feeder, GROUP_NAMES
 
 # ============ CONFIG ============
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-NUM_CLASS = 4
+NUM_CLASS = 5
 NUM_POINT = 20
 NUM_PERSON = 1
 IN_CHANNELS = 3
@@ -187,55 +187,97 @@ def main():
             torch.save(model.state_dict(), save_path)
             print(f'  ★ New best: {best_acc*100:.1f}% → saved to {save_path}')
     
-    # === Done — Print edge importance ===
+    # === Extract Per-Group Importance (Gradient-based) ===
     print("\n" + "=" * 60)
-    print(f"Training hoàn tất! Best accuracy: {best_acc*100:.1f}%")
+    print("Extracting Class-Specific Importance (Gradient Analysis)")
     print("=" * 60)
     
-    # Load best model
-    model.load_state_dict(torch.load(os.path.join(SAVE_DIR, 'best_model.pt')))
+    model.eval()
     
-    # Print edge importance per joint
-    joint_importance = model.get_edge_importance_per_joint()
-    
-    UCLA_JOINT_NAMES = [
-        'hip_center', 'spine', 'neck', 'head',          # 0-3
-        'l_shoulder', 'l_elbow', 'l_wrist', 'l_hand',   # 4-7
-        'r_shoulder', 'r_elbow', 'r_wrist', 'r_hand',   # 8-11
-        'l_hip', 'l_knee', 'l_ankle', 'l_foot',         # 12-15
-        'r_hip', 'r_knee', 'r_ankle', 'r_foot',         # 16-19
-    ]
-    
-    print("\n>>> Edge Importance per Joint (normalized):")
-    sorted_idx = np.argsort(joint_importance)[::-1]
-    for idx in sorted_idx:
-        bar = '█' * int(joint_importance[idx] * 30)
-        print(f"  Joint {idx:2d} ({UCLA_JOINT_NAMES[idx]:>12s}): {joint_importance[idx]:.4f} {bar}")
-    
-    # Map to 5 body parts
+    # Define TARGET_JOINTS
     TARGET_JOINTS = {
-        'head': [2, 3],           # neck, head
-        'l_hand': [4, 5, 6, 7],   # l_shoulder → l_hand
-        'r_hand': [8, 9, 10, 11], # r_shoulder → r_hand
-        'l_leg': [12, 13, 14, 15], # l_hip → l_foot
-        'r_leg': [16, 17, 18, 19], # r_hip → r_foot
+        "head": [2, 3],           # neck, head
+        "l_hand": [4, 5, 6, 7],   # l_shoulder → l_hand
+        "r_hand": [8, 9, 10, 11], # r_shoulder → r_hand
+        "l_leg": [12, 13, 14, 15], # l_hip → l_foot
+        "r_leg": [16, 17, 18, 19], # r_hip → r_foot
     }
     
-    print("\n>>> Body Part Importance (for FiveFS weighting):")
-    body_part_weights = {}
-    for part, joints in TARGET_JOINTS.items():
-        w = np.mean([joint_importance[j] for j in joints])
-        body_part_weights[part] = w
-        bar = '█' * int(w * 30)
-        print(f"  {part:>8s}: {w:.4f} {bar}")
+    # Store gradients per group
+    # group_grads[g][part] = list of gradients
+    group_grads = {g: {p: [] for p in TARGET_JOINTS.keys()} for g in range(NUM_CLASS)}
     
-    # Save body part weights
+    # Enable gradients on input for analysis
+    # We need to run forward pass on a subset of data
+    analyze_subset_size = 200  # Analyze 200 samples per group (approx)
+    
+    print(f"analyzing gradients on training set ({analyze_subset_size} samples)...")
+    
+    analyzed_count = {g: 0 for g in range(NUM_CLASS)}
+    
+    for data, label, _ in tqdm(train_loader, desc="Analyzing Gradients"):
+        if all(c >= analyze_subset_size for c in analyzed_count.values()):
+            break
+            
+        data = data.float().to(DEVICE)
+        data.requires_grad = True
+        label = label.long().to(DEVICE)
+        
+        output = model(data)
+        
+        # Compute gradient for true class
+        # score = output[torch.arange(B), label]
+        score = torch.gather(output, 1, label.unsqueeze(1)).squeeze()
+        score.sum().backward()
+        
+        # Get input gradient: (B, C, T, V, M)
+        # We want importance per node V: sum over C, T, M
+        grad = data.grad.abs().sum(dim=(1, 2, 4))  # (B, V)
+        grad = grad.detach().cpu().numpy()
+        
+        labels_np = label.detach().cpu().numpy()
+        
+        for i in range(len(labels_np)):
+            g = labels_np[i]
+            if analyzed_count[g] < analyze_subset_size:
+                # Map 20 joints to 5 body parts
+                for part, joints in TARGET_JOINTS.items():
+                    # Average gradient of joints in this part
+                    part_grad = np.mean([grad[i, j] for j in joints])
+                    group_grads[g][part].append(part_grad)
+                analyzed_count[g] += 1
+    
+    # Compute average importance per group
+    final_group_weights = {}
+    
+    print("\n>>> Per-Group Body Part Importance:")
+    for g in range(NUM_CLASS):
+        print(f"\nGroup {g}: {GROUP_NAMES[g]}")
+        avg_grads = {}
+        for part in TARGET_JOINTS.keys():
+            if len(group_grads[g][part]) > 0:
+                avg_grads[part] = np.mean(group_grads[g][part])
+            else:
+                avg_grads[part] = 0.0
+        
+        # Normalize to max 1.0 per group
+        max_val = max(avg_grads.values()) if avg_grads else 1.0
+        if max_val == 0: max_val = 1.0
+        
+        final_group_weights[g] = {}
+        for part, val in avg_grads.items():
+            norm_val = val / max_val
+            final_group_weights[g][part] = float(norm_val)
+            bar = '█' * int(norm_val * 20)
+            print(f"  {part:>8s}: {norm_val:.4f} {bar}")
+
+    # Save to JSON
     import json
-    weights_path = os.path.join(SAVE_DIR, 'body_part_weights.json')
+    weights_path = os.path.join(SAVE_DIR, 'group_weights.json')
     with open(weights_path, 'w') as f:
-        json.dump(body_part_weights, f, indent=2)
-    print(f"\n>>> Body part weights saved to: {weights_path}")
-    print(">>> Dùng weights này trong gen_ucla_stroi_weighted.py để tạo ảnh weighted nhất quán!")
+        json.dump(final_group_weights, f, indent=2)
+    print(f"\n>>> Saved group weights to: {weights_path}")
+    print(">>> Dùng file này cho gen_ucla_stroi_weighted_stgcn.py")
 
 
 if __name__ == '__main__':
