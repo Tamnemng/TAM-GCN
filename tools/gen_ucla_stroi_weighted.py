@@ -178,7 +178,7 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
 
 if __name__ == '__main__':
     WEIGHTS_PATH = './result/nucla/CTROGC-GCN.pt' 
-    INPUT_FIVEFS_PATH = './ucla_stroi/'       # Đường dẫn tới ảnh FiveFS gốc (output của gen_ucla_stroi.py)
+    INPUT_FIVEFS_PATH = '../drive/MyDrive/Data/ucla_fivefs'       # Đường dẫn tới ảnh FiveFS gốc (output của gen_ucla_stroi.py)
     OUTPUT_PATH = './ucla_stroi_weighted/'     # Đường dẫn lưu ảnh weighted
     
     generate_weighted_images(WEIGHTS_PATH, INPUT_FIVEFS_PATH, OUTPUT_PATH)
