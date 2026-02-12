@@ -16,6 +16,9 @@ import torch
 import torch.nn as nn
 from collections import OrderedDict
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report
 
 sys.path.append(os.getcwd())
 
@@ -248,6 +251,50 @@ def print_results(title, acc, correct, total, class_acc):
     print(f'{"="*60}')
 
 
+def plot_confusion_matrix(scores, labels, title, output_path):
+    """Vẽ confusion matrix và lưu ra file PNG."""
+    preds = np.argmax(scores, axis=1)
+    acc = (preds == labels).sum() / len(labels)
+    
+    class_names = [LABEL_NAMES[i] for i in range(NUM_CLASS)]
+    # Rút gọn tên cho đẹp trên heatmap
+    short_names = [
+        'Pick 1H', 'Pick 2H', 'Drop', 'Walk',
+        'Sit', 'Stand', 'Donning', 'Doffing',
+        'Throw', 'Carry'
+    ]
+    
+    cm = confusion_matrix(labels, preds, labels=list(range(NUM_CLASS)))
+    cm_norm = cm.astype('float') / (cm.sum(axis=1, keepdims=True) + 1e-8)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(24, 10))
+    
+    # --- Confusion matrix (counts) ---
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=short_names, yticklabels=short_names,
+                ax=axes[0], cbar_kws={'shrink': 0.8})
+    axes[0].set_xlabel('Predicted', fontsize=12)
+    axes[0].set_ylabel('True', fontsize=12)
+    axes[0].set_title(f'{title}\nConfusion Matrix (Counts) — Acc: {acc*100:.2f}%', fontsize=14)
+    axes[0].tick_params(axis='x', rotation=45)
+    axes[0].tick_params(axis='y', rotation=0)
+    
+    # --- Confusion matrix (normalized) ---
+    sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Oranges',
+                xticklabels=short_names, yticklabels=short_names,
+                ax=axes[1], vmin=0, vmax=1, cbar_kws={'shrink': 0.8})
+    axes[1].set_xlabel('Predicted', fontsize=12)
+    axes[1].set_ylabel('True', fontsize=12)
+    axes[1].set_title(f'{title}\nConfusion Matrix (Normalized) — Acc: {acc*100:.2f}%', fontsize=14)
+    axes[1].tick_params(axis='x', rotation=45)
+    axes[1].tick_params(axis='y', rotation=0)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f'  📊 Confusion matrix saved: {output_path}')
+
+
 def main():
     args = parse_args()
     
@@ -390,6 +437,41 @@ def main():
     
     print(f'\n  Best alpha: {best_alpha} → Accuracy: {best_acc*100:.2f}%')
     print(f'{"="*60}')
+    
+    # ---- Vẽ Confusion Matrix ----
+    print(f'\n>>> Vẽ Confusion Matrix...')
+    
+    save_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 1. Confusion matrix cho alpha hiện tại
+    plot_confusion_matrix(
+        ensemble_scores, labels_common,
+        f'Ensemble (ResNet + {args.alpha} × CTR-GCN)',
+        os.path.join(save_dir, f'confusion_matrix_alpha_{args.alpha}.png')
+    )
+    
+    # 2. Confusion matrix cho best alpha
+    if best_alpha != args.alpha:
+        best_scores = resnet_norm + best_alpha * ctrgcn_norm
+        plot_confusion_matrix(
+            best_scores, labels_common,
+            f'Ensemble (ResNet + {best_alpha} × CTR-GCN) — BEST',
+            os.path.join(save_dir, f'confusion_matrix_alpha_{best_alpha}_best.png')
+        )
+    
+    # 3. Confusion matrix cho từng model riêng lẻ
+    plot_confusion_matrix(
+        ctrgcn_scores_arr, ctrgcn_labels_arr,
+        'CTR-GCN (Skeleton Only)',
+        os.path.join(save_dir, 'confusion_matrix_ctrgcn.png')
+    )
+    plot_confusion_matrix(
+        resnet_scores_arr, resnet_labels_arr,
+        'ResNet50 (RGB Weighted Only)',
+        os.path.join(save_dir, 'confusion_matrix_resnet.png')
+    )
+    
+    print(f'\n>>> Done! Tất cả confusion matrix đã lưu trong: {save_dir}')
 
 
 if __name__ == '__main__':
