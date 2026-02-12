@@ -54,7 +54,7 @@ def parse_args():
                         help='Path to ResNet model weights (.pt)')
     parser.add_argument('--data_path', type=str, default='../drive/MyDrive/Data/Data/NW-UCLA-ALL/',
                         help='Path to skeleton data root')
-    parser.add_argument('--rgb_path', type=str, default='../drive/MyDrive/Data/ucla_stroi_weighted_no_group/',
+    parser.add_argument('--rgb_path', type=str, default='../drive/MyDrive/Data/ucla_stroi_weighted_stgcn/',
                         help='Path to weighted RGB images')
     parser.add_argument('--alpha', type=float, default=1.0,
                         help='Weight for CTR-GCN score. Final = ResNet + alpha * CTR-GCN')
