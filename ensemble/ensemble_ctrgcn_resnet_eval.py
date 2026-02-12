@@ -1,10 +1,12 @@
 """
 Ensemble evaluation: CTR-GCN (skeleton) + ResNet50 (RGB weighted images)
 
+Fusion theo filename để đảm bảo đúng sample giữa 2 model.
+
 Usage:
     python ensemble/ensemble_ctrgcn_resnet_eval.py
     python ensemble/ensemble_ctrgcn_resnet_eval.py --alpha 0.5
-    python ensemble/ensemble_ctrgcn_resnet_eval.py --ctrgcn_weights ./result/nucla/CTROGC-GCN.pt --resnet_weights ./result/nucla/resnet_weight_group.pt
+    python ensemble/ensemble_ctrgcn_resnet_eval.py --resnet_weights work_dir/nucla_123/resnet_only/best_model.pt
 """
 import sys
 import os
@@ -12,6 +14,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+from collections import OrderedDict
 from tqdm import tqdm
 
 sys.path.append(os.getcwd())
@@ -48,13 +51,33 @@ def parse_args():
                         help='Path to ResNet model weights (.pt)')
     parser.add_argument('--data_path', type=str, default='../drive/MyDrive/Data/Data/NW-UCLA-ALL/',
                         help='Path to skeleton data root')
-    parser.add_argument('--rgb_path', type=str, default='../drive/MyDrive/Data/ucla_stroi_weighted/',
+    parser.add_argument('--rgb_path', type=str, default='../drive/MyDrive/Data/ucla_stroi_weighted_no_group/',
                         help='Path to weighted RGB images')
     parser.add_argument('--alpha', type=float, default=1.0,
                         help='Weight for CTR-GCN score. Final = ResNet + alpha * CTR-GCN')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size for evaluation')
     return parser.parse_args()
+
+
+def load_weights_robust(weights_path, device):
+    """Load weights với xử lý các format khác nhau (module. prefix, nested dict, etc.)"""
+    raw = torch.load(weights_path, map_location=device)
+    
+    # Xử lý nested dict format
+    if isinstance(raw, dict):
+        if 'model_state_dict' in raw:
+            raw = raw['model_state_dict']
+        elif 'state_dict' in raw:
+            raw = raw['state_dict']
+    
+    # Xử lý module. prefix (DataParallel)
+    new_state = OrderedDict()
+    for k, v in raw.items():
+        name = k.replace('module.', '')
+        new_state[name] = v
+    
+    return new_state
 
 
 def load_ctrgcn(weights_path, device):
@@ -68,10 +91,24 @@ def load_ctrgcn(weights_path, device):
         in_channels=3,
     ).to(device)
     
-    state_dict = torch.load(weights_path, map_location=device)
-    model.load_state_dict(state_dict)
+    state_dict = load_weights_robust(weights_path, device)
+    
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        print(f"  ✓ CTR-GCN loaded (strict) from: {weights_path}")
+    except RuntimeError as e:
+        print(f"  ⚠ Strict load failed: {e}")
+        print(f"  → Trying partial load...")
+        model_state = model.state_dict()
+        loaded = 0
+        for k, v in state_dict.items():
+            if k in model_state and model_state[k].size() == v.size():
+                model_state[k] = v
+                loaded += 1
+        model.load_state_dict(model_state)
+        print(f"  ✓ CTR-GCN partial loaded ({loaded}/{len(model_state)} params)")
+    
     model.eval()
-    print(f"  ✓ CTR-GCN loaded from: {weights_path}")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"    Parameters: {total_params:,}")
     return model
@@ -81,57 +118,106 @@ def load_resnet(weights_path, device):
     """Load ResNet50 model with trained weights."""
     model = ResNet_Model(num_class=NUM_CLASS, pretrained=False).to(device)
     
-    state_dict = torch.load(weights_path, map_location=device)
-    model.load_state_dict(state_dict)
+    state_dict = load_weights_robust(weights_path, device)
+    
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        print(f"  ✓ ResNet50 loaded (strict) from: {weights_path}")
+    except RuntimeError as e:
+        print(f"  ⚠ Strict load failed: {e}")
+        print(f"  → Trying partial load...")
+        model_state = model.state_dict()
+        loaded = 0
+        for k, v in state_dict.items():
+            if k in model_state and model_state[k].size() == v.size():
+                model_state[k] = v
+                loaded += 1
+        model.load_state_dict(model_state)
+        print(f"  ✓ ResNet50 partial loaded ({loaded}/{len(model_state)} params)")
+    
     model.eval()
-    print(f"  ✓ ResNet50 loaded from: {weights_path}")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"    Parameters: {total_params:,}")
     return model
 
 
-def evaluate_ctrgcn(model, dataloader, device):
-    """Evaluate CTR-GCN model, return scores and labels."""
-    all_scores = []
-    all_labels = []
+def evaluate_ctrgcn_by_filename(model, dataset, batch_size, device):
+    """
+    Evaluate CTR-GCN model, return dict {filename: score_array}.
+    feeder_nucla_gcn trả về (skeleton, rgb, label, index).
+    data_dict[index]['file_name'] để lấy filename.
+    """
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=2
+    )
     
+    scores_dict = {}  # filename -> score
+    labels_dict = {}  # filename -> label
+    
+    sample_idx = 0
     with torch.no_grad():
-        for data, _rgb, label, _idx in tqdm(dataloader, desc='CTR-GCN Inference'):
+        for data, _rgb, label, indices in tqdm(loader, desc='CTR-GCN Inference'):
             data = data.float().to(device)
             output = model(data)
-            all_scores.append(output.cpu().numpy())
-            all_labels.append(label.numpy() if isinstance(label, torch.Tensor) else np.array(label))
+            output_np = output.cpu().numpy()
+            
+            if isinstance(label, torch.Tensor):
+                label_np = label.numpy()
+            else:
+                label_np = np.array(label)
+            
+            if isinstance(indices, torch.Tensor):
+                indices_np = indices.numpy()
+            else:
+                indices_np = np.array(indices)
+            
+            for i in range(len(label_np)):
+                idx = indices_np[i] % len(dataset.data_dict)
+                fname = dataset.data_dict[idx]['file_name']
+                scores_dict[fname] = output_np[i]
+                labels_dict[fname] = label_np[i]
     
-    scores = np.concatenate(all_scores, axis=0)
-    labels = np.concatenate(all_labels, axis=0)
-    return scores, labels
+    return scores_dict, labels_dict
 
 
-def evaluate_resnet(model, dataloader, device):
-    """Evaluate ResNet model, return scores and labels."""
-    all_scores = []
-    all_labels = []
+def evaluate_resnet_by_filename(model, dataset, batch_size, device):
+    """
+    Evaluate ResNet model, return dict {filename: score_array}.
+    feeder_nucla_resnet trả về (rgb, label, filename).
+    """
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=2
+    )
+    
+    scores_dict = {}  # filename -> score
+    labels_dict = {}  # filename -> label
     
     with torch.no_grad():
-        for rgb, label, _filename in tqdm(dataloader, desc='ResNet Inference'):
+        for rgb, label, filenames in tqdm(loader, desc='ResNet Inference'):
             rgb = rgb.float().to(device)
             output = model(rgb)
-            all_scores.append(output.cpu().numpy())
-            all_labels.append(label.numpy() if isinstance(label, torch.Tensor) else np.array([label]))
+            output_np = output.cpu().numpy()
+            
+            if isinstance(label, torch.Tensor):
+                label_np = label.numpy()
+            else:
+                label_np = np.array(label)
+            
+            for i in range(len(label_np)):
+                fname = filenames[i] if isinstance(filenames, (list, tuple)) else filenames
+                scores_dict[fname] = output_np[i]
+                labels_dict[fname] = label_np[i]
     
-    scores = np.concatenate(all_scores, axis=0)
-    labels = np.concatenate(all_labels, axis=0)
-    return scores, labels
+    return scores_dict, labels_dict
 
 
-def compute_accuracy(scores, labels, label_names=None):
+def compute_accuracy(scores, labels):
     """Compute overall and per-class accuracy."""
     preds = np.argmax(scores, axis=1)
     correct = (preds == labels).sum()
     total = len(labels)
     acc = correct / total
     
-    # Per-class
     class_acc = {}
     for c in range(NUM_CLASS):
         mask = labels == c
@@ -195,12 +281,6 @@ def main():
         window_size=52,
         normalization=False,
     )
-    skeleton_loader = torch.utils.data.DataLoader(
-        skeleton_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=2,
-    )
     print(f"  Skeleton val samples: {len(skeleton_dataset)}")
     
     # RGB data for ResNet
@@ -208,41 +288,76 @@ def main():
         label_path='val',
         rgb_path=args.rgb_path,
     )
-    resnet_loader = torch.utils.data.DataLoader(
-        resnet_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=2,
-    )
     print(f"  RGB val samples: {len(resnet_dataset)}")
     
-    # ---- Evaluate individual models ----
+    # ---- Evaluate individual models (by filename) ----
     print("\n>>> Evaluating CTR-GCN...")
-    ctrgcn_scores, ctrgcn_labels = evaluate_ctrgcn(ctrgcn_model, skeleton_loader, DEVICE)
+    ctrgcn_scores_dict, ctrgcn_labels_dict = evaluate_ctrgcn_by_filename(
+        ctrgcn_model, skeleton_dataset, args.batch_size, DEVICE
+    )
     
     print("\n>>> Evaluating ResNet...")
-    resnet_scores, resnet_labels = evaluate_resnet(resnet_model, resnet_loader, DEVICE)
+    resnet_scores_dict, resnet_labels_dict = evaluate_resnet_by_filename(
+        resnet_model, resnet_dataset, args.batch_size, DEVICE
+    )
     
-    # ---- Individual results ----
-    acc_c, cor_c, tot_c, cls_c = compute_accuracy(ctrgcn_scores, ctrgcn_labels)
+    # ---- Report độc lập từng model ----
+    # CTR-GCN
+    ctrgcn_fnames = sorted(ctrgcn_scores_dict.keys())
+    ctrgcn_scores_arr = np.array([ctrgcn_scores_dict[f] for f in ctrgcn_fnames])
+    ctrgcn_labels_arr = np.array([ctrgcn_labels_dict[f] for f in ctrgcn_fnames])
+    acc_c, cor_c, tot_c, cls_c = compute_accuracy(ctrgcn_scores_arr, ctrgcn_labels_arr)
     print_results('CTR-GCN (Skeleton Only)', acc_c, cor_c, tot_c, cls_c)
     
-    acc_r, cor_r, tot_r, cls_r = compute_accuracy(resnet_scores, resnet_labels)
+    # ResNet
+    resnet_fnames = sorted(resnet_scores_dict.keys())
+    resnet_scores_arr = np.array([resnet_scores_dict[f] for f in resnet_fnames])
+    resnet_labels_arr = np.array([resnet_labels_dict[f] for f in resnet_fnames])
+    acc_r, cor_r, tot_r, cls_r = compute_accuracy(resnet_scores_arr, resnet_labels_arr)
     print_results('ResNet50 (RGB Weighted Only)', acc_r, cor_r, tot_r, cls_r)
     
-    # ---- Ensemble fusion ----
-    # Both datasets should have the same samples in the same order
-    # Normalize scores (softmax) before fusion for fair comparison
+    # ---- Ensemble fusion (filename-matched) ----
+    # Tìm common filenames giữa 2 model
+    common_fnames = sorted(set(ctrgcn_scores_dict.keys()) & set(resnet_scores_dict.keys()))
+    print(f"\n  Common samples for fusion: {len(common_fnames)}")
+    
+    if len(common_fnames) == 0:
+        print("  ❌ Không có sample chung! Kiểm tra lại data.")
+        print(f"     CTR-GCN filenames (mẫu): {ctrgcn_fnames[:5]}")
+        print(f"     ResNet filenames (mẫu): {resnet_fnames[:5]}")
+        return
+    
+    only_ctrgcn = set(ctrgcn_scores_dict.keys()) - set(resnet_scores_dict.keys())
+    only_resnet = set(resnet_scores_dict.keys()) - set(ctrgcn_scores_dict.keys())
+    if only_ctrgcn:
+        print(f"  ⚠ {len(only_ctrgcn)} samples chỉ có ở CTR-GCN (bỏ qua)")
+    if only_resnet:
+        print(f"  ⚠ {len(only_resnet)} samples chỉ có ở ResNet (bỏ qua)")
+    
+    # Build aligned arrays
+    ctrgcn_common = np.array([ctrgcn_scores_dict[f] for f in common_fnames])
+    resnet_common = np.array([resnet_scores_dict[f] for f in common_fnames])
+    labels_common = np.array([ctrgcn_labels_dict[f] for f in common_fnames])
+    
+    # Verify labels match
+    resnet_labels_common = np.array([resnet_labels_dict[f] for f in common_fnames])
+    if not np.array_equal(labels_common, resnet_labels_common):
+        print("  ⚠ Labels không khớp giữa 2 feeder! Kiểm tra label mapping.")
+        mismatch = (labels_common != resnet_labels_common).sum()
+        print(f"    Số sample labels khác nhau: {mismatch}/{len(common_fnames)}")
+        print(f"    CTR-GCN labels unique: {np.unique(labels_common)}")
+        print(f"    ResNet labels unique:  {np.unique(resnet_labels_common)}")
+    
+    # Normalize scores (softmax) before fusion
     from scipy.special import softmax
-    ctrgcn_norm = softmax(ctrgcn_scores, axis=1)
-    resnet_norm = softmax(resnet_scores, axis=1)
+    ctrgcn_norm = softmax(ctrgcn_common, axis=1)
+    resnet_norm = softmax(resnet_common, axis=1)
     
     print(f"\n>>> Ensemble Fusion: ResNet + {args.alpha} * CTR-GCN")
     
     ensemble_scores = resnet_norm + args.alpha * ctrgcn_norm
     
-    # Use ctrgcn_labels as ground truth (both should be the same)
-    acc_e, cor_e, tot_e, cls_e = compute_accuracy(ensemble_scores, ctrgcn_labels)
+    acc_e, cor_e, tot_e, cls_e = compute_accuracy(ensemble_scores, labels_common)
     print_results(f'ENSEMBLE (ResNet + {args.alpha} * CTR-GCN)', acc_e, cor_e, tot_e, cls_e)
     
     # ---- Summary comparison ----
@@ -266,7 +381,7 @@ def main():
     for alpha in [0.1, 0.2, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0]:
         combo = resnet_norm + alpha * ctrgcn_norm
         preds = np.argmax(combo, axis=1)
-        acc = (preds == ctrgcn_labels).sum() / len(ctrgcn_labels)
+        acc = (preds == labels_common).sum() / len(labels_common)
         marker = ' ★' if acc > best_acc or (acc == best_acc and alpha == best_alpha) else ''
         print(f'  {alpha:<10.1f} {acc*100:<12.2f}{marker}')
         if acc > best_acc:
