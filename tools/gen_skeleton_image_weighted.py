@@ -1,28 +1,22 @@
 """
-Apply Soft Attention (per-joint) lên ảnh skeleton-to-image sử dụng CTR-GCN.
+Skeleton-to-Image Encoding + Per-Joint Soft Attention từ CTR-GCN.
 
-Ý tưởng:
-  - Trong ảnh skeleton-to-image, trục ngang (width) = joints (sau reorder),
-    trục dọc (height) = temporal frames.
-  - CTR-GCN extract feature importance cho TỪNG JOINT riêng lẻ.
-  - Joint nào CTR-GCN cho trọng số cao → cột đó sáng lên (rõ hơn).
-  - Joint nào trọng số thấp → cột đó mờ đi.
-  
-  Ví dụ: Tay có 4 joints (Shoulder, Elbow, Wrist, Hand).
-         Nếu CTR-GCN nói Wrist quan trọng nhất → vùng cột Wrist sáng,
-         Shoulder ít quan trọng → vùng cột Shoulder tối hơn.
+Tất cả trong 1 script — KHÔNG cần tạo ảnh gốc trước.
+Chỉ cần skeleton data (JSON) + CTR-GCN weights (.pt).
 
-Flow:
-  1. Load ảnh skeleton-to-image đã tạo bởi skeleton_to_image.py
-  2. Load skeleton → feed CTR-GCN → extract per-joint importance
-  3. Map 20 joint weights theo UCLA_JOINT_REORDER (giống skeleton_to_image.py)
-  4. Tạo attention map: 1 cột = 1 weight → resize lên (224, 224)
-  5. Nhân attention lên ảnh → clip → save
+Flow cho mỗi sample:
+  1. Load skeleton từ feeder_nucla_gcn (JSON)
+  2. Feed skeleton → CTR-GCN → extract per-joint importance
+  3. Tạo skeleton-to-image: X→R, Y→G, Z→B → resize 224×224
+  4. Tạo per-joint attention map → nhân lên ảnh
+     - Joint nào CTR-GCN cho trọng số CAO → cột đó SÁNG lên
+     - Joint nào trọng số THẤP → cột đó MỜ đi
+  5. Lưu ảnh weighted
 
 Cách dùng:
   python gen_skeleton_image_weighted.py \
       --weights ./result/nucla/CTROGC-GCN.pt \
-      --input ./skeleton_images \
+      --data_path ../drive/MyDrive/Data/NWUCLA_SKE/all_sqe \
       --output ./skeleton_images_weighted
 """
 
@@ -31,13 +25,14 @@ import sys
 import torch
 import numpy as np
 import cv2
+import argparse
 from tqdm import tqdm
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 sys.path.append(os.getcwd())
 
 from models.ctrgcn import Model as CTRGCN
-from feeder.feeder_nucla_fusion import Feeder
+from feeder.feeder_nucla_gcn import Feeder
 
 # ============================================================================
 # Config
@@ -47,191 +42,171 @@ OUTPUT_SIZE = 224
 output_device = 0 if torch.cuda.is_available() else 'cpu'
 device = torch.device(f"cuda:{output_device}" if torch.cuda.is_available() else "cpu")
 
-# Joint reorder — PHẢI GIỐNG HỆT skeleton_to_image.py
+# PHẢI GIỐNG HỆT skeleton_to_image.py
 UCLA_JOINT_REORDER = [
-    3, 2, 1, 0,         # Group 1 - Spine
-    4, 5, 6, 7,          # Group 2 - Left Arm
-    8, 9, 10, 11,        # Group 3 - Right Arm
-    12, 13, 14, 15,      # Group 4 - Left Leg
-    16, 17, 18, 19,      # Group 5 - Right Leg
+    3, 2, 1, 0,         # Spine: Head, ShldrCenter, Spine, HipCenter
+    4, 5, 6, 7,          # Left Arm: Shoulder, Elbow, Wrist, Hand
+    8, 9, 10, 11,        # Right Arm: Shoulder, Elbow, Wrist, Hand
+    12, 13, 14, 15,      # Left Leg: Hip, Knee, Ankle, Foot
+    16, 17, 18, 19,      # Right Leg: Hip, Knee, Ankle, Foot
 ]
 
 JOINT_NAMES = [
-    'Head', 'ShldrCtr', 'Spine', 'HipCtr',           # Spine group
-    'ShldrL', 'ElbowL', 'WristL', 'HandL',           # Left Arm
-    'ShldrR', 'ElbowR', 'WristR', 'HandR',           # Right Arm
-    'HipL', 'KneeL', 'AnkleL', 'FootL',              # Left Leg
-    'HipR', 'KneeR', 'AnkleR', 'FootR',              # Right Leg
+    'Head', 'ShldrCtr', 'Spine', 'HipCtr',
+    'ShldrL', 'ElbowL', 'WristL', 'HandL',
+    'ShldrR', 'ElbowR', 'WristR', 'HandR',
+    'HipL', 'KneeL', 'AnkleL', 'FootL',
+    'HipR', 'KneeR', 'AnkleR', 'FootR',
 ]
 
 NUM_JOINTS = len(UCLA_JOINT_REORDER)  # 20
 
 
+# ============================================================================
+# Core functions
+# ============================================================================
+
+def skeleton_to_image(skeleton_np, output_size=OUTPUT_SIZE):
+    """
+    Encode skeleton (3, T, 20, 1) hoặc (3, T, 20) → ảnh float32 (H, W, 3).
+    CHƯA clip/uint8 — để apply attention trước.
+    """
+    if skeleton_np.ndim == 4:
+        skeleton_np = skeleton_np[:, :, :, 0]
+
+    C, T, V = skeleton_np.shape
+    reordered = skeleton_np[:, :, UCLA_JOINT_REORDER]
+
+    def norm(arr):
+        a_min, a_max = arr.min(), arr.max()
+        if a_max - a_min < 1e-8:
+            return np.zeros_like(arr, dtype=np.float32)
+        return ((arr - a_min) / (a_max - a_min) * 255.0).astype(np.float32)
+
+    r = cv2.resize(norm(reordered[0]), (output_size, output_size), interpolation=cv2.INTER_LINEAR)
+    g = cv2.resize(norm(reordered[1]), (output_size, output_size), interpolation=cv2.INTER_LINEAR)
+    b = cv2.resize(norm(reordered[2]), (output_size, output_size), interpolation=cv2.INTER_LINEAR)
+
+    return np.stack([r, g, b], axis=-1)  # (H, W, 3) float32 [0, 255]
+
+
 def extract_per_joint_importance(model, skeleton_tensor):
     """
-    Extract per-joint importance score từ CTR-GCN.
-    
-    Args:
-        model: CTR-GCN model (eval mode)
-        skeleton_tensor: (1, C, T, V, M) tensor on device
-    
-    Returns:
-        joint_importance: numpy array shape (V,) — importance per joint (original order)
+    CTR-GCN → per-joint importance score.
+    Input:  (1, C, T, V, M) tensor
+    Output: (V,) numpy — importance cho mỗi joint
     """
     N, C, T, V, M = skeleton_tensor.size()
-    
+
     with torch.no_grad():
         _, feature = model.extract_feature(skeleton_tensor)
-        # feature shape: (N, C_feat, T_feat, V, M)
-    
-    # L2 norm across feature channels → per-joint-per-timestep magnitude
-    # (N, C_feat, T_feat, V, M) → sum over C_feat → (N, T_feat, V, M)
+        # (N, C_feat, T_feat, V, M)
+
+    # L2 norm qua channel dim → (N, T_feat, V, M)
     intensity = (feature * feature).sum(dim=1) ** 0.5
-    intensity = intensity.cpu().detach().numpy()  # (N, T_feat, V, M)
-    
-    # Chọn person chính (nếu M > 1)
+    intensity = intensity.cpu().detach().numpy()
+
     person_idx = 0
-    if M > 1:
-        if intensity[0, :, :, 0].mean() < intensity[0, :, :, 1].mean():
-            person_idx = 1
-    
-    # Per-joint importance: trung bình theo temporal axis
-    # intensity[0, :, :, person_idx] shape: (T_feat, V)
-    joint_importance = intensity[0, :, :, person_idx].mean(axis=0)  # (V,)
-    
+    if M > 1 and intensity[0, :, :, 0].mean() < intensity[0, :, :, 1].mean():
+        person_idx = 1
+
+    # Mean qua temporal axis → (V,)
+    joint_importance = intensity[0, :, :, person_idx].mean(axis=0)
     return joint_importance
 
 
-def create_per_joint_attention_map(joint_weights_reordered, output_size=OUTPUT_SIZE):
+def create_attention_map(joint_weights_reordered, output_size=OUTPUT_SIZE):
     """
-    Tạo 2D attention map từ per-joint weights.
-    
-    Trong skeleton-to-image:
-      - Width (trục ngang) = joints (sau reorder) 
-      - Height (trục dọc) = temporal frames
-    
-    → Mỗi cột (joint) có weight riêng.
-    → Resize từ (1, num_joints) lên (output_size, output_size).
-    
-    Args:
-        joint_weights_reordered: (num_joints,) weights đã theo thứ tự reorder
-        output_size: kích thước ảnh
-    
-    Returns:
-        attention_map: (output_size, output_size) float32
+    Per-joint weights → 2D attention map.
+    Mỗi CỘT (joint) trong ảnh skeleton-to-image có 1 weight riêng.
     """
-    # 1D weight vector → (1, num_joints) 
     attn_1d = joint_weights_reordered.reshape(1, -1).astype(np.float32)
-    
-    # Resize lên (output_size, output_size)
-    # Mỗi "cột" joint sẽ được kéo dãn ra theo cả 2 chiều
-    attn_map = cv2.resize(attn_1d, (output_size, output_size), 
-                          interpolation=cv2.INTER_LINEAR)
-    
-    return attn_map
+    return cv2.resize(attn_1d, (output_size, output_size), interpolation=cv2.INTER_LINEAR)
 
 
-def generate_weighted_skeleton_images(
-    weights_path, input_path, output_path, output_size=OUTPUT_SIZE
-):
+# ============================================================================
+# Main pipeline
+# ============================================================================
+
+def generate_weighted_images(weights_path, data_path, output_path, output_size=OUTPUT_SIZE):
     """
-    Apply per-joint soft attention lên ảnh skeleton-to-image.
-    
-    Args:
-        weights_path: path tới file CTR-GCN weights (.pt)
-        input_path: path tới folder chứa ảnh skeleton-to-image (output của skeleton_to_image.py)
-        output_path: path lưu ảnh weighted
-        output_size: kích thước ảnh
+    Tạo ảnh skeleton-to-image có per-joint soft attention từ CTR-GCN.
     """
     os.makedirs(output_path, exist_ok=True)
 
     # --- Khởi tạo CTR-GCN ---
     print(">>> Đang khởi tạo CTR-GCN...")
     model = CTRGCN(
-        num_class=10,
-        num_point=20,
-        num_person=1,
+        num_class=10, num_point=20, num_person=1,
         graph='graph.ucla.Graph',
         graph_args={'labeling_mode': 'spatial'},
-        in_channels=3,
-        drop_out=0,
-        adaptive=True
+        in_channels=3, drop_out=0, adaptive=True
     ).to(device)
 
     if weights_path and os.path.exists(weights_path):
         print(f">>> Loading weights: {weights_path}")
         try:
-            state_dict = torch.load(weights_path, map_location=device)
-            model.load_state_dict(state_dict)
-            print(">>> Load weights thành công!")
+            model.load_state_dict(torch.load(weights_path, map_location=device))
+            print(">>> Load thành công!")
         except Exception as e:
-            print(f"!!! Cảnh báo: Không load được ({e}). Dùng weights ngẫu nhiên.")
+            print(f"!!! Lỗi load weights: {e}")
     else:
         print(f"!!! Không tìm thấy: {weights_path}")
 
     model.eval()
 
-    # --- Process từng split ---
-    splits = ['train', 'val']
+    # --- Process ---
     total_count = 0
-    skip_count = 0
     debug_count = 0
     DEBUG_LIMIT = 5
 
-    for split in splits:
-        print(f"\n>>> Đang xử lý split: {split}")
+    for split in ['train', 'val']:
+        print(f"\n>>> Split: {split}")
+
+        # feeder_nucla_gcn dùng label_path để xác định split:
+        # 'val' in label_path → val split, otherwise → train split
+        label_path = f'{split}_label'
+
         feeder = Feeder(
-            split=split,
+            data_path=data_path,
+            label_path=label_path,
             random_choose=False,
             random_shift=False,
             random_move=False,
             window_size=50,
-            temporal_rgb_frames=5
         )
 
         loader = torch.utils.data.DataLoader(
-            dataset=feeder,
-            batch_size=1,
-            shuffle=False,
-            num_workers=0
+            dataset=feeder, batch_size=1, shuffle=False, num_workers=0
         )
 
-        for i, (data, label, index) in enumerate(tqdm(loader, desc=f"  {split}")):
-            # data[0] = skeleton: (N, C, T, V, M)
-            data_ske = data[0].float().to(device)
+        for batch in tqdm(loader, desc=f"  {split}"):
+            # feeder_nucla_gcn trả về: (data, rgb_tensor, label, index)
+            data_ske, _, label, index = batch
+
+            # data_ske shape: (1, 3, T, 20, 1) — skeleton only
+            data_ske = data_ske.float().to(device)
+            if data_ske.ndim == 4:
+                data_ske = data_ske.unsqueeze(-1)  # thêm M dim nếu thiếu
 
             idx = index.item()
-            file_name = feeder.data_dict[idx]['file_name']
+            file_name = feeder.data_dict[idx % len(feeder.data_dict)]['file_name']
 
-            # --- Load ảnh skeleton-to-image gốc ---
-            img_path = os.path.join(input_path, f"{file_name}.png")
-            if not os.path.exists(img_path):
-                skip_count += 1
-                continue
-
-            img_bgr = cv2.imread(img_path)
-            if img_bgr is None:
-                skip_count += 1
-                continue
-            img_float = img_bgr.astype(np.float32)  # (H, W, 3) BGR, [0, 255]
-
-            # --- Extract per-joint importance từ CTR-GCN ---
+            # --- Extract per-joint importance ---
             joint_importance = extract_per_joint_importance(model, data_ske)
-            # joint_importance shape: (20,) — original joint order
+            # (20,) — original joint order
 
-            # Reorder theo UCLA_JOINT_REORDER (giống skeleton_to_image.py)
-            joint_importance_reordered = joint_importance[UCLA_JOINT_REORDER]
+            # Reorder theo UCLA_JOINT_REORDER
+            ji_reordered = joint_importance[UCLA_JOINT_REORDER]
 
-            # Normalize về [0.5, 1.5]
-            # → Joint quan trọng nhất: sáng lên 50% (×1.5)
-            # → Joint ít quan trọng nhất: mờ đi 50% (×0.5)
-            w_min, w_max = joint_importance_reordered.min(), joint_importance_reordered.max()
+            # Normalize → [0.5, 1.5]
+            w_min, w_max = ji_reordered.min(), ji_reordered.max()
             if (w_max - w_min) > 1e-8:
-                joint_weights = 0.5 + 1.0 * (joint_importance_reordered - w_min) / (w_max - w_min)
+                joint_weights = 0.5 + 1.0 * (ji_reordered - w_min) / (w_max - w_min)
             else:
                 joint_weights = np.ones(NUM_JOINTS)
 
-            # Debug: in weights cho vài sample đầu
+            # Debug
             if debug_count < DEBUG_LIMIT:
                 print(f"\n  [DEBUG] {file_name}:")
                 for j in range(NUM_JOINTS):
@@ -239,25 +214,24 @@ def generate_weighted_skeleton_images(
                     print(f"    {JOINT_NAMES[j]:>10s} [{j:2d}]: {joint_weights[j]:.3f} {bar}")
                 debug_count += 1
 
-            # --- Tạo attention map và apply ---
-            attn_map = create_per_joint_attention_map(joint_weights, output_size)
-            # attn_map shape: (H, W), mỗi cột = weight của 1 joint
+            # --- Tạo skeleton-to-image ---
+            skeleton_np = data_ske[0].cpu().numpy()  # (3, T, 20, 1)
+            image_float = skeleton_to_image(skeleton_np, output_size)  # (H, W, 3)
 
-            # Nhân attention lên cả 3 channels
-            weighted_img = img_float * attn_map[:, :, np.newaxis]
+            # --- Apply per-joint attention ---
+            attn_map = create_attention_map(joint_weights, output_size)  # (H, W)
+            weighted_img = image_float * attn_map[:, :, np.newaxis]
 
             # Clip + uint8
             weighted_img = np.clip(weighted_img, 0, 255).astype(np.uint8)
 
-            # Save
+            # Save (RGB → BGR for OpenCV)
             save_path = os.path.join(output_path, f"{file_name}.png")
-            cv2.imwrite(save_path, weighted_img)
+            cv2.imwrite(save_path, cv2.cvtColor(weighted_img, cv2.COLOR_RGB2BGR))
             total_count += 1
 
     print(f"\n{'='*60}")
-    print(f"Hoàn tất! Đã tạo {total_count} ảnh weighted tại: {output_path}")
-    if skip_count > 0:
-        print(f"Bỏ qua {skip_count} mẫu (không tìm thấy ảnh gốc)")
+    print(f"Hoàn tất! Đã tạo {total_count} ảnh tại: {output_path}")
 
 
 # ============================================================================
@@ -265,10 +239,8 @@ def generate_weighted_skeleton_images(
 # ============================================================================
 
 if __name__ == '__main__':
-    import argparse
-
     parser = argparse.ArgumentParser(
-        description="Apply per-joint soft attention (CTR-GCN) lên skeleton-to-image"
+        description="Skeleton-to-Image + Per-Joint Soft Attention (CTR-GCN)"
     )
     parser.add_argument(
         '--weights', '-w', type=str,
@@ -276,9 +248,9 @@ if __name__ == '__main__':
         help='Path tới CTR-GCN weights (.pt)'
     )
     parser.add_argument(
-        '--input', '-i', type=str,
-        default='./skeleton_images',
-        help='Path tới folder ảnh skeleton-to-image (output của skeleton_to_image.py)'
+        '--data_path', '-d', type=str,
+        default='../drive/MyDrive/Data/NWUCLA_SKE/all_sqe',
+        help='Path tới folder chứa skeleton JSON (mỗi sample 1 subfolder chứa .json)'
     )
     parser.add_argument(
         '--output', '-o', type=str,
@@ -291,9 +263,9 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    generate_weighted_skeleton_images(
+    generate_weighted_images(
         weights_path=args.weights,
-        input_path=args.input,
+        data_path=args.data_path,
         output_path=args.output,
         output_size=args.size,
     )
