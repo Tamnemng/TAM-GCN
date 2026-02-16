@@ -1,22 +1,25 @@
 """
-Skeleton-to-Image Encoding + Per-Joint Soft Attention từ CTR-GCN.
+Skeleton-to-Image Encoding + 2D Soft Attention (T × J) từ CTR-GCN.
 
 Tất cả trong 1 script — KHÔNG cần tạo ảnh gốc trước.
 Chỉ cần skeleton data (JSON) + CTR-GCN weights (.pt).
 
-Flow cho mỗi sample:
-  1. Load skeleton từ feeder_nucla_gcn (JSON)
-  2. Feed skeleton → CTR-GCN → extract per-joint importance
-  3. Tạo skeleton-to-image: X→R, Y→G, Z→B → resize 224×224
-  4. Tạo per-joint attention map → nhân lên ảnh
-     - Joint nào CTR-GCN cho trọng số CAO → cột đó SÁNG lên
-     - Joint nào trọng số THẤP → cột đó MỜ đi
-  5. Lưu ảnh weighted
+Attention 2D:
+  Ảnh skeleton-to-image có 2 trục:
+    - Height (trục dọc)  = Temporal frames (T)
+    - Width  (trục ngang) = Joints (J)
+  
+  CTR-GCN extract_feature trả về feature shape (T_feat, V).
+  → Tạo attention map 2D (T_feat, V_reordered) → resize (224, 224)
+  → Mỗi vùng (t, j) trong ảnh có weight riêng biệt!
+  
+  Ví dụ: Frame 10 + HandL có importance cao → vùng đó SÁNG
+         Frame 30 + HandL có importance thấp → vùng đó MỜ
 
 Cách dùng:
-  python gen_skeleton_image_weighted.py \
-      --weights ./result/nucla/CTROGC-GCN.pt \
-      --data_path ../drive/MyDrive/Data/NWUCLA_SKE/all_sqe \
+  python gen_skeleton_image_weighted.py \\
+      --weights ./result/nucla/CTROGC-GCN.pt \\
+      --data_path ../drive/MyDrive/Data/NWUCLA_SKE/all_sqe \\
       --output ./skeleton_images_weighted
 """
 
@@ -90,17 +93,19 @@ def skeleton_to_image(skeleton_np, output_size=OUTPUT_SIZE):
     return np.stack([r, g, b], axis=-1)  # (H, W, 3) float32 [0, 255]
 
 
-def extract_per_joint_importance(model, skeleton_tensor):
+def extract_2d_importance(model, skeleton_tensor):
     """
-    CTR-GCN → per-joint importance score.
+    CTR-GCN → 2D importance map (T_feat, V).
+    Mỗi (timestep, joint) có importance riêng.
+    
     Input:  (1, C, T, V, M) tensor
-    Output: (V,) numpy — importance cho mỗi joint
+    Output: (T_feat, V) numpy — importance cho mỗi (t, j)
     """
     N, C, T, V, M = skeleton_tensor.size()
 
     with torch.no_grad():
         _, feature = model.extract_feature(skeleton_tensor)
-        # (N, C_feat, T_feat, V, M)
+        # feature shape: (N, C_feat, T_feat, V, M)
 
     # L2 norm qua channel dim → (N, T_feat, V, M)
     intensity = (feature * feature).sum(dim=1) ** 0.5
@@ -110,18 +115,33 @@ def extract_per_joint_importance(model, skeleton_tensor):
     if M > 1 and intensity[0, :, :, 0].mean() < intensity[0, :, :, 1].mean():
         person_idx = 1
 
-    # Mean qua temporal axis → (V,)
-    joint_importance = intensity[0, :, :, person_idx].mean(axis=0)
-    return joint_importance
+    # Giữ NGUYÊN 2D: (T_feat, V) — KHÔNG mean qua temporal!
+    importance_2d = intensity[0, :, :, person_idx]  # (T_feat, V)
+    return importance_2d
 
 
-def create_attention_map(joint_weights_reordered, output_size=OUTPUT_SIZE):
+def create_2d_attention_map(importance_2d, joint_reorder, output_size=OUTPUT_SIZE):
     """
-    Per-joint weights → 2D attention map.
-    Mỗi CỘT (joint) trong ảnh skeleton-to-image có 1 weight riêng.
+    2D importance (T_feat, V) → attention map (output_size, output_size).
+    
+    Reorder joints theo joint_reorder, rồi resize bilinear.
+    Height = temporal, Width = joints.
     """
-    attn_1d = joint_weights_reordered.reshape(1, -1).astype(np.float32)
-    return cv2.resize(attn_1d, (output_size, output_size), interpolation=cv2.INTER_LINEAR)
+    # Reorder joints (cột) theo thứ tự skeleton-to-image
+    importance_reordered = importance_2d[:, joint_reorder]  # (T_feat, V_reordered)
+    
+    # Normalize về [0.5, 1.5]
+    w_min, w_max = importance_reordered.min(), importance_reordered.max()
+    if (w_max - w_min) > 1e-8:
+        attn = 0.5 + 1.0 * (importance_reordered - w_min) / (w_max - w_min)
+    else:
+        attn = np.ones_like(importance_reordered)
+    
+    # Resize (T_feat, V_reordered) → (output_size, output_size)
+    attn = attn.astype(np.float32)
+    attn_map = cv2.resize(attn, (output_size, output_size), interpolation=cv2.INTER_LINEAR)
+    
+    return attn_map
 
 
 # ============================================================================
@@ -192,34 +212,39 @@ def generate_weighted_images(weights_path, data_path, output_path, output_size=O
             idx = index.item()
             file_name = feeder.data_dict[idx % len(feeder.data_dict)]['file_name']
 
-            # --- Extract per-joint importance ---
-            joint_importance = extract_per_joint_importance(model, data_ske)
-            # (20,) — original joint order
+            # --- Extract 2D importance (T_feat, V) ---
+            importance_2d = extract_2d_importance(model, data_ske)
+            # (T_feat, V) — importance cho mỗi (timestep, joint)
 
-            # Reorder theo UCLA_JOINT_REORDER
-            ji_reordered = joint_importance[UCLA_JOINT_REORDER]
-
-            # Normalize → [0.5, 1.5]
-            w_min, w_max = ji_reordered.min(), ji_reordered.max()
-            if (w_max - w_min) > 1e-8:
-                joint_weights = 0.5 + 1.0 * (ji_reordered - w_min) / (w_max - w_min)
-            else:
-                joint_weights = np.ones(NUM_JOINTS)
+            # --- Tạo 2D attention map ---
+            attn_map = create_2d_attention_map(
+                importance_2d, UCLA_JOINT_REORDER, output_size
+            )  # (224, 224) — mỗi pixel có weight riêng!
 
             # Debug
             if debug_count < DEBUG_LIMIT:
-                print(f"\n  [DEBUG] {file_name}:")
+                # Tính per-joint mean để show summary
+                ji_reordered = importance_2d[:, UCLA_JOINT_REORDER]
+                joint_means = ji_reordered.mean(axis=0)
+                jm_min, jm_max = joint_means.min(), joint_means.max()
+                if (jm_max - jm_min) > 1e-8:
+                    jm_norm = 0.5 + 1.0 * (joint_means - jm_min) / (jm_max - jm_min)
+                else:
+                    jm_norm = np.ones(NUM_JOINTS)
+                
+                print(f"\n  [DEBUG] {file_name} — attention 2D ({importance_2d.shape[0]}×{importance_2d.shape[1]}) → ({output_size}×{output_size}):")
+                print(f"    Attn map range: [{attn_map.min():.3f}, {attn_map.max():.3f}]")
+                print(f"    Per-joint mean importance (reordered):")
                 for j in range(NUM_JOINTS):
-                    bar = '█' * int(joint_weights[j] * 20)
-                    print(f"    {JOINT_NAMES[j]:>10s} [{j:2d}]: {joint_weights[j]:.3f} {bar}")
+                    bar = '█' * int(jm_norm[j] * 20)
+                    print(f"      {JOINT_NAMES[j]:>10s} [{j:2d}]: {jm_norm[j]:.3f} {bar}")
                 debug_count += 1
 
             # --- Tạo skeleton-to-image ---
             skeleton_np = data_ske[0].cpu().numpy()  # (3, T, 20, 1)
             image_float = skeleton_to_image(skeleton_np, output_size)  # (H, W, 3)
 
-            # --- Apply per-joint attention ---
-            attn_map = create_attention_map(joint_weights, output_size)  # (H, W)
+            # --- Apply 2D attention ---
             weighted_img = image_float * attn_map[:, :, np.newaxis]
 
             # Clip + uint8
