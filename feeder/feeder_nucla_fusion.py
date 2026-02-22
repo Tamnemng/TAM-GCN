@@ -29,6 +29,8 @@ class Feeder(Dataset):
 
         if normalization:
             self.get_mean_map()
+            
+        self.sample_name = [info['file_name'] for info in self.data_dict]
 
     def get_mean_map(self):
         pass

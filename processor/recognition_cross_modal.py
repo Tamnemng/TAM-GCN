@@ -97,6 +97,20 @@ class REC_Processor(Processor):
             
             self.io.print_log('Accuracy: {:.2f}%'.format(100 * accuracy))
             self.epoch_info['ls_cls'] = 100 * accuracy
+            
+            # Save logic for the parent processor
+            if self.arg.phase == 'train' and 'best_acc' not in self.meta_info:
+                self.meta_info['best_acc'] = 0.0
+            
+            if self.arg.phase == 'train' and accuracy > self.meta_info['best_acc']:
+                self.meta_info['best_acc'] = accuracy
+                self.meta_info['is_best'] = True
+            else:
+                self.meta_info['is_best'] = False
+                
+            # If the user wants to save results explicitly
+            if self.arg.save_result:
+                self.result = list(predict_labels)
 
     def load_weights(self):
         if self.arg.weights:

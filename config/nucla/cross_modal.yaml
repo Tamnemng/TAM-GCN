@@ -51,3 +51,5 @@ test_batch_size: 32
 num_epoch: 80
 nesterov: True
 eval_interval: 1
+save_interval: 5
+save_result: True
