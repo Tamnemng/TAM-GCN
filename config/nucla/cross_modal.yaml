@@ -20,6 +20,7 @@ test_feeder_args:
   label_path: val
   debug: False
   temporal_rgb_frames: 5
+  window_size: 52
 
 # model
 model: models.resnet_gcn_attention.ResNet_GCN_Attention

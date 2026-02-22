@@ -98,6 +98,10 @@ class Feeder(Dataset):
             data_numpy = tools.random_choose(data_numpy, self.window_size)
         elif self.window_size > 0:
             data_numpy = tools.auto_pading(data_numpy, self.window_size)
+            C, T, V, M = data_numpy.shape
+            if T > self.window_size:
+                begin = (T - self.window_size) // 2
+                data_numpy = data_numpy[:, begin:begin + self.window_size, :, :]
         if self.random_move:
             data_numpy = tools.random_move(data_numpy)
         try:
