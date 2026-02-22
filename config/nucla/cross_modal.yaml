@@ -3,7 +3,7 @@ work_dir: ./work_dir/nucla/cross_modal_attention
 # feeder
 feeder: feeder.feeder_nucla_fusion.Feeder
 train_feeder_args:
-  data_path: C:/Users/nguyn/Downloads/NW-UCLA-ALL/NW-UCLA-ALL
+  data_path: ../drive/MyDrive/Data/NW-UCLA-ALL
   label_path: train
   debug: False
   random_choose: True
@@ -14,7 +14,7 @@ train_feeder_args:
   temporal_rgb_frames: 5
 
 test_feeder_args:
-  data_path: C:/Users/nguyn/Downloads/NW-UCLA-ALL/NW-UCLA-ALL
+  data_path: ../drive/MyDrive/Data/NW-UCLA-ALL
   label_path: val
   debug: False
   temporal_rgb_frames: 5

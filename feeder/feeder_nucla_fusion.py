@@ -19,7 +19,7 @@ class Feeder(Dataset):
         self.window_size = window_size
         self.normalization = normalization
         self.temporal_rgb_frames = temporal_rgb_frames
-        self.data_path = kwargs.get('data_path', 'C:/Users/nguyn/Downloads/NW-UCLA-ALL/NW-UCLA-ALL')
+        self.data_path = kwargs.get('data_path', '../drive/MyDrive/Data/NW-UCLA-ALL')
         
         
         if self.split == 'val':
