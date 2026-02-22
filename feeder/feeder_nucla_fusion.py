@@ -19,8 +19,7 @@ class Feeder(Dataset):
         self.window_size = window_size
         self.normalization = normalization
         self.temporal_rgb_frames = temporal_rgb_frames
-        self.rgb_root = '../drive/MyDrive/Data/ucla_fivefs' 
-        self.skeleton_root = '../drive/MyDrive/Data/NWUCLA_SKE/all_sqe'
+        self.data_path = kwargs.get('data_path', 'C:/Users/nguyn/Downloads/NW-UCLA-ALL/NW-UCLA-ALL')
         
         
         if self.split == 'val':
@@ -85,7 +84,9 @@ class Feeder(Dataset):
         info = self.data_dict[index]
         name = info['file_name']
         label = int(info['label']) - 1
-        skeleton_path = os.path.join(self.skeleton_root, name + '.json')
+        
+        # New structure: data_path / name / name.json
+        skeleton_path = os.path.join(self.data_path, name, name + '.json')
         data_numpy = self.load_one_skeleton_file(skeleton_path)
         data_numpy = np.array(data_numpy)
         valid_frame_num = np.sum(data_numpy.sum(0).sum(-1).sum(-1) != 0)
@@ -104,8 +105,9 @@ class Feeder(Dataset):
                 data_numpy = data_numpy[:, begin:begin + self.window_size, :, :]
         if self.random_move:
             data_numpy = tools.random_move(data_numpy)
+            
         try:
-            data_rgb = tools.load_rgb_images(self.rgb_root, name, self.temporal_rgb_frames)
+            data_rgb = tools.load_rgb_images(self.data_path, name, self.temporal_rgb_frames)
         except Exception as e:
             print(f"Warning: Không load được ảnh cho {name}, dùng ảnh đen. Lỗi: {e}")
             data_rgb = np.zeros((3 * self.temporal_rgb_frames, 224, 224)).astype(np.float32)

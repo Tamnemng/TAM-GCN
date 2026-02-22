@@ -213,34 +213,50 @@ def calculate_recall_precision(label, score):
 
     return precision, recall
 
-def load_rgb_images(rgb_root, name, temporal_rgb_frames, size=224):
+def load_rgb_images(data_path, name, temporal_rgb_frames, size=224):
     """
-    Hàm load ảnh thật từ file .png hoặc .jpg
+    Hàm load ảnh raw sequence frames (ví dụ temporal_rgb_frames=5 -> 15 channels)
     """
+    import glob
     transform = transforms.Compose([
         transforms.Resize((size, size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    img_path = os.path.join(rgb_root, name + '.png')
-    if not os.path.exists(img_path):
-        img_path = os.path.join(rgb_root, name + '.jpg')
-
-    img_list = []
     
+    seq_dir = os.path.join(data_path, name)
     try:
-        if os.path.exists(img_path):
+        # Lấy tất cả các frame jpg trong folder
+        frames = glob.glob(os.path.join(seq_dir, 'frame_*_rgb.jpg'))
+        if not frames:
+            frames = glob.glob(os.path.join(seq_dir, '*.jpg'))
+            if not frames:
+                raise FileNotFoundError(f"Không tìm thấy frame nào trong {seq_dir}")
+                
+        # Sắp xếp các frame theo thứ tự thời gian (ID integer)
+        def get_frame_num(f):
+            try:
+                base = os.path.basename(f)
+                return int(base.split('_')[1])
+            except:
+                return f
+        frames = sorted(frames, key=get_frame_num)
+        
+        # Parse evenly spaced frames
+        num_frames = len(frames)
+        # Sử dụng round để lấy các index dàn đều
+        indices = np.linspace(0, num_frames - 1, temporal_rgb_frames).round().astype(int)
+        
+        img_list = []
+        for idx in indices:
+            img_path = frames[idx]
             img = Image.open(img_path).convert('RGB')
             img_tensor = transform(img)
-            img_numpy = img_tensor.numpy()
-            for i in range(temporal_rgb_frames):
-                img_list.append(img_numpy)
-            output = np.concatenate(img_list, axis=0)
-            return output
-        else:
-            print(f"!!! Cảnh báo: Không tìm thấy ảnh tại {img_path}")
-            raise FileNotFoundError(img_path)
-
+            img_list.append(img_tensor.numpy())
+            
+        output = np.concatenate(img_list, axis=0) # shape (15, 224, 224)
+        return output
+        
     except Exception as e:
-        print(f"Lỗi load ảnh {name}: {e}. Dùng ảnh đen thay thế.")
+        print(f"Lỗi load frame sequence {name}: {e}. Dùng ảnh đen thay thế.")
         return np.zeros((3 * temporal_rgb_frames, size, size)).astype(np.float32)
