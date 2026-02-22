@@ -7,7 +7,7 @@ from tqdm import tqdm
 from PIL import Image
 
 sys.path.append(os.getcwd())
-from models.stgcn import Model as STGCN
+from models.ctrgcn import Model as CTRGCN
 from feeder.feeder_nucla_fusion import Feeder
 
 output_device = 0 if torch.cuda.is_available() else 'cpu'
@@ -34,17 +34,16 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
     if not os.path.exists(output_path):
         os.makedirs(output_path)
 
-    # --- Khởi tạo mô hình ST-GCN ---
-    print(">>> Đang khởi tạo mô hình ST-GCN...")
+    # --- Khởi tạo mô hình CTR-GCN ---
+    print(">>> Đang khởi tạo mô hình CTR-GCN...")
     graph_args = {'labeling_mode': 'spatial'}
-    model_ske = STGCN(
+    model_ske = CTRGCN(
         in_channels=3,
         num_class=10, 
         num_point=20, 
         num_person=1,
         graph='graph.ucla.Graph',
-        graph_args=graph_args,
-        edge_importance_weighting=True
+        graph_args=graph_args
     ).to(device)
 
     if weights_path and os.path.exists(weights_path):
@@ -116,8 +115,9 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
             if (feat_max - feat_min) > 0:
                 feature_s = (feature_s - feat_min) / (feat_max - feat_min)
             
-            # --- Tính trọng số cho mỗi body part ---
-            weights_per_part = np.ones(NUM_BODY_PARTS)
+            T_feat = feature_s.shape[1]
+            num_frames = 5
+            weights_per_part = np.ones((NUM_BODY_PARTS, num_frames))
             
             n = 0  # batch_size = 1
             person_idx = 0
@@ -125,25 +125,32 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
                 if feature_s[n, :, :, 0].mean() < feature_s[n, :, :, 1].mean():
                     person_idx = 1
             
-            temporal_positions = 15  # số timestep dùng để tính trung bình
+            # Chia temporal dimension thành 5 segment tương ứng với 5 frames
+            segment_size = max(1, T_feat // num_frames)
             
-            for j, v_idx in enumerate(TARGET_JOINTS):
-                if v_idx < V:
-                    feature_val = feature_s[n, :, v_idx, person_idx]
-                    # Lấy top-k temporal positions có giá trị cao nhất
-                    k = min(temporal_positions, len(feature_val))
-                    top_k_vals = np.partition(feature_val, -k)[-k:]
-                    weights_per_part[j] = top_k_vals.mean()
+            for f in range(num_frames):
+                start_t = f * segment_size
+                end_t = (f + 1) * segment_size if f < num_frames - 1 else T_feat
+                
+                # Lấy top 50% temporal positions trong mỗi segment
+                temporal_positions = max(1, (end_t - start_t) // 2) 
+                
+                for j, v_idx in enumerate(TARGET_JOINTS):
+                    if v_idx < V:
+                        feature_val = feature_s[n, start_t:end_t, v_idx, person_idx]
+                        k = min(temporal_positions, len(feature_val))
+                        if k > 0:
+                            top_k_vals = np.partition(feature_val, -k)[-k:]
+                            weights_per_part[j, f] = top_k_vals.mean()
+                        else:
+                            weights_per_part[j, f] = 0.0
             
             # Normalize trọng số về khoảng [0.5, 1.5]
-            # - Body part quan trọng nhất → tăng sáng 50% (1.5)
-            # - Body part ít quan trọng → giảm sáng 50% (0.5)
-            # → Vừa enhance phần quan trọng, vừa giảm phần không quan trọng
             w_min, w_max = weights_per_part.min(), weights_per_part.max()
             if (w_max - w_min) > 0:
                 weights_per_part = 0.5 + 1.0 * (weights_per_part - w_min) / (w_max - w_min)
             else:
-                weights_per_part = np.ones(NUM_BODY_PARTS)
+                weights_per_part = np.ones((NUM_BODY_PARTS, num_frames))
             
             # Debug logging cho vài sample đầu
             if debug_count < DEBUG_LIMIT:
@@ -156,12 +163,18 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
             #   Hàng: 5 body parts (head, l_hand, r_hand, l_leg, r_leg), mỗi hàng cao PART_SIZE
             #   Cột: 5 temporal frames, mỗi cột rộng PART_SIZE
             part_h = img_h // NUM_BODY_PARTS
+            part_w = img_w // 5
             
             weighted_img = fivefs_np.copy()
             for j in range(NUM_BODY_PARTS):
-                y_start = j * part_h
-                y_end = (j + 1) * part_h if j < NUM_BODY_PARTS - 1 else img_h
-                weighted_img[y_start:y_end, :, :] *= weights_per_part[j]
+                for f in range(5):
+                    y_start = j * part_h
+                    y_end = (j + 1) * part_h if j < NUM_BODY_PARTS - 1 else img_h
+                    
+                    x_start = f * part_w
+                    x_end = (f + 1) * part_w if f < 4 else img_w
+                    
+                    weighted_img[y_start:y_end, x_start:x_end, :] *= weights_per_part[j, f]
             
             # Clip về [0, 255] — KHÔNG re-normalize để giữ hiệu ứng trọng số
             weighted_img = np.clip(weighted_img, 0, 255).astype(np.uint8)
@@ -178,7 +191,7 @@ def generate_weighted_images(weights_path, input_fivefs_path, output_path):
 
 
 if __name__ == '__main__':
-    WEIGHTS_PATH = './result/nucla/ST-GCN.pt' 
+    WEIGHTS_PATH = './result/nucla/CTROGC-GCN.pt' 
     INPUT_FIVEFS_PATH = '../drive/MyDrive/Data/ucla_fivefs'       # Đường dẫn tới ảnh FiveFS gốc (output của gen_ucla_stroi.py)
     OUTPUT_PATH = './ucla_stroi_weighted/'     # Đường dẫn lưu ảnh weighted
     

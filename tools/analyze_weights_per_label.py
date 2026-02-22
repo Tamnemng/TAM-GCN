@@ -9,6 +9,7 @@ import numpy as np
 import sys
 import os
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 from collections import defaultdict
 
 sys.path.append(os.getcwd())
@@ -61,11 +62,18 @@ def analyze_weights(weights_path):
 
     model_ske.eval()
 
-    # Thu thập weights theo label
-    # Key: label, Value: list of weight arrays (mỗi array có 5 phần tử)
-    weights_by_label = defaultdict(list)
+    # Thu thập 1 sample cho mỗi label
+    collected_labels = set()
+    output_dir = './weight_heatmaps'
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        
+    print(f"\n>>> Sẽ lưu các biểu đồ nhiệt (heatmap) tại: {output_dir}")
     
     for split in ['train', 'val']:
+        if len(collected_labels) >= 10:
+            break
+            
         print(f"\n>>> Đang xử lý: {split}")
         feeder = Feeder(
             split=split,
@@ -81,9 +89,13 @@ def analyze_weights(weights_path):
         )
 
         for i, (data, label, index) in enumerate(tqdm(loader)):
-            data_ske = data[0].float().to(device)
             lbl = label.item()
             
+            # Chỉ lấy 1 sample cho mỗi label
+            if lbl in collected_labels:
+                continue
+                
+            data_ske = data[0].float().to(device)
             N, C, T, V, M = data_ske.size()
             
             with torch.no_grad():
@@ -97,102 +109,69 @@ def analyze_weights(weights_path):
             if (feat_max - feat_min) > 0:
                 feature_s = (feature_s - feat_min) / (feat_max - feat_min)
             
-            weights_per_part = np.ones(NUM_BODY_PARTS)
+            # Cấu trúc: 5 body parts, 5 frames
+            num_frames = 5
+            weights_per_part = np.ones((NUM_BODY_PARTS, num_frames))
+            
             n = 0
             person_idx = 0
             
-            _, _, V_feat, M_feat = feature_s.shape
+            _, T_feat, V_feat, M_feat = feature_s.shape
             
-            temporal_positions = 15
-            for j, v_idx in enumerate(TARGET_JOINTS):
-                if v_idx < V_feat:
-                    feature_val = feature_s[n, :, v_idx, person_idx]
-                    k = min(temporal_positions, len(feature_val))
-                    top_k_vals = np.partition(feature_val, -k)[-k:]
-                    weights_per_part[j] = top_k_vals.mean()
+            # Chia T_feat thành 5 phần bằng nhau cho 5 frames
+            segment_size = max(1, T_feat // num_frames)
             
-            # Normalize về [0.5, 1.5] như script chính
+            for f in range(num_frames):
+                start_t = f * segment_size
+                end_t = (f + 1) * segment_size if f < num_frames - 1 else T_feat
+                
+                temporal_positions = max(1, (end_t - start_t) // 2)
+                
+                for j, v_idx in enumerate(TARGET_JOINTS):
+                    if v_idx < V_feat:
+                        feature_val = feature_s[n, start_t:end_t, v_idx, person_idx]
+                        k = min(temporal_positions, len(feature_val))
+                        if k > 0:
+                            top_k_vals = np.partition(feature_val, -k)[-k:]
+                            weights_per_part[j, f] = top_k_vals.mean()
+                        else:
+                            weights_per_part[j, f] = 0.0
+            
+            # Normalize về [0.5, 1.5]
             w_min, w_max = weights_per_part.min(), weights_per_part.max()
             if (w_max - w_min) > 0:
                 weights_per_part = 0.5 + 1.0 * (weights_per_part - w_min) / (w_max - w_min)
             else:
-                weights_per_part = np.ones(NUM_BODY_PARTS)
+                weights_per_part = np.ones((NUM_BODY_PARTS, num_frames))
             
-            weights_by_label[lbl].append(weights_per_part)
-
-    # ===== IN KẾT QUẢ =====
-    print("\n" + "=" * 80)
-    print("PHÂN TÍCH TRỌNG SỐ BODY PART THEO TỪNG LABEL")
-    print("=" * 80)
-    print(f"{'':>5} | {'head':>12} | {'l_hand':>12} | {'r_hand':>12} | {'l_leg':>12} | {'r_leg':>12} | {'Consistency':>12}")
-    print("-" * 95)
-    
-    for lbl in sorted(weights_by_label.keys()):
-        ws = np.array(weights_by_label[lbl])  # (num_samples, 5)
-        mean_w = ws.mean(axis=0)
-        std_w = ws.std(axis=0)
-        avg_std = std_w.mean()
-        
-        action = ACTION_NAMES.get(lbl, f'action_{lbl}')
-        
-        # In trung bình
-        w_str = " | ".join([f"{mean_w[j]:.3f}±{std_w[j]:.2f}" for j in range(NUM_BODY_PARTS)])
-        
-        # Đánh giá consistency: std thấp = nhất quán, std cao = không nhất quán
-        if avg_std < 0.05:
-            consistency = "✓ Tốt"
-        elif avg_std < 0.12:
-            consistency = "~ Trung bình"
-        else:
-            consistency = "✗ Kém"
-        
-        print(f"L{lbl:>2}  | {w_str} | {consistency:>12}")
-        
-    print("-" * 95)
-    
-    # In phân tích chi tiết
-    print("\n" + "=" * 80)
-    print("CHI TIẾT: Body part nào bị LÀM MỜ / TĂNG SÁNG theo từng action")
-    print("=" * 80)
-    
-    for lbl in sorted(weights_by_label.keys()):
-        ws = np.array(weights_by_label[lbl])
-        mean_w = ws.mean(axis=0)
-        std_w = ws.std(axis=0)
-        avg_std = std_w.mean()
-        
-        action = ACTION_NAMES.get(lbl, f'action_{lbl}')
-        n_samples = len(ws)
-        
-        print(f"\n--- Label {lbl}: {action} ({n_samples} samples, avg_std={avg_std:.4f}) ---")
-        
-        # Sắp xếp body parts theo importance
-        sorted_parts = np.argsort(mean_w)  # ascending → phần tử đầu = ít quan trọng nhất
-        
-        darkened = []
-        brightened = []
-        neutral = []
-        
-        for idx in sorted_parts:
-            w = mean_w[idx]
-            s = std_w[idx]
-            name = PARTS_NAMES[idx]
-            if w < 0.8:
-                darkened.append(f"{name} (w={w:.3f}±{s:.2f})")
-            elif w > 1.2:
-                brightened.append(f"{name} (w={w:.3f}±{s:.2f})")
-            else:
-                neutral.append(f"{name} (w={w:.3f}±{s:.2f})")
-        
-        if brightened:
-            print(f"  🔆 Tăng sáng: {', '.join(brightened)}")
-        if neutral:
-            print(f"  ⚪ Trung tính: {', '.join(neutral)}")
-        if darkened:
-            print(f"  🔅 Làm mờ:    {', '.join(darkened)}")
-        
-        if avg_std > 0.12:
-            print(f"  ⚠️  STD CAO ({avg_std:.3f}): Weight KHÔNG nhất quán giữa các sample → gây nhiễu!")
+            # ----- Vẽ Heatmap và Lưu Ảnh -----
+            plt.figure(figsize=(8, 6))
+            
+            # Trục y là Body Parts, Trục x là Frames
+            # cmap 'Reds' hoặc 'viridis' để thể hiện heatmap
+            plt.imshow(weights_per_part, cmap='viridis', aspect='auto')
+            plt.colorbar(label='Trọng số (Weight)')
+            
+            plt.yticks(ticks=np.arange(NUM_BODY_PARTS), labels=PARTS_NAMES)
+            plt.xticks(ticks=np.arange(num_frames), labels=[f"Frame {idx+1}" for idx in range(num_frames)])
+            
+            action_name = ACTION_NAMES.get(lbl, f'action_{lbl}')
+            plt.title(f'Bản đồ nhiệt trọng số - Label {lbl}: {action_name}')
+            
+            plt.tight_layout()
+            
+            # Đánh index mảng
+            filename = f"label_{lbl:02d}_{action_name.replace(' ', '_')}.png"
+            save_path = os.path.join(output_dir, filename)
+            plt.savefig(save_path, dpi=150)
+            plt.close()
+            
+            collected_labels.add(lbl)
+            
+            # Dừng nếu đã đủ 10 labels
+            if len(collected_labels) >= 10:
+                print(f"\n>>> Đã tạo xong hình ảnh cho {len(collected_labels)} labels!")
+                break
 
 
 if __name__ == '__main__':
