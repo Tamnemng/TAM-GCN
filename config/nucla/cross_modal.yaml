@@ -1,0 +1,54 @@
+work_dir: ./work_dir/nucla/cross_modal_attention
+
+# feeder
+feeder: feeder.feeder_nucla_fusion.Feeder
+train_feeder_args:
+  data_path: ../drive/MyDrive/Data/NWUCLA_SKE/all_sqe/
+  # rgb_path is hardcoded inside Feeder
+  label_path: train
+  debug: False
+  random_choose: True
+  random_shift: False
+  random_move: False
+  window_size: 52
+  normalization: False
+  temporal_rgb_frames: 5
+
+test_feeder_args:
+  data_path: ../drive/MyDrive/Data/NWUCLA_SKE/all_sqe/
+  # rgb_path is hardcoded inside Feeder
+  label_path: val
+  debug: False
+  temporal_rgb_frames: 5
+
+# model
+model: models.resnet_gcn_attention.ResNet_GCN_Attention
+model_args:
+  num_class: 10
+  num_point: 20
+  num_person: 1
+  graph: graph.ucla.Graph
+  graph_args:
+    labeling_mode: "spatial"
+  drop_out: 0
+  in_channels_gcn: 3
+  in_channels_rgb: 15
+  adaptive: True
+  freeze_gcn: True
+
+# load pretrained weights for GCN component
+weights: ./result/nucla/CTROGC-GCN.pt
+
+# optim
+weight_decay: 0.0001
+base_lr: 0.01 # Lower LR because Resnet is pretrained
+lr_decay_rate: 0.1
+step: [30, 60]
+
+# training
+device: [0]
+batch_size: 16
+test_batch_size: 32
+num_epoch: 80
+nesterov: True
+eval_interval: 1

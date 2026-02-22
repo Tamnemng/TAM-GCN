@@ -1,0 +1,62 @@
+# command line: main.py recognition_cross_modal -c config/nucla/cross_modal.yaml
+
+base_lr: 0.01
+batch_size: 16
+config: config/nucla/cross_modal.yaml
+debug: false
+device:
+- 0
+eval_interval: 1
+feeder: feeder.feeder_nucla_fusion.Feeder
+ignore_weights: []
+log_interval: 100
+lr_decay_rate: 0.1
+model: models.resnet_gcn_attention.ResNet_GCN_Attention
+model_args:
+    adaptive: true
+    drop_out: 0
+    freeze_gcn: true
+    graph: graph.ucla.Graph
+    graph_args:
+        labeling_mode: spatial
+    in_channels_gcn: 3
+    in_channels_rgb: 15
+    num_class: 10
+    num_person: 1
+    num_point: 20
+nesterov: true
+num_epoch: 80
+num_worker: 4
+optimizer: SGD
+pavi_log: false
+phase: train
+print_log: true
+save_interval: 10
+save_log: true
+save_result: false
+skeleton_bones_pkl: ./work_dir/tmp
+skeleton_joints_pkl: ./work_dir/tmp
+start_epoch: 0
+step:
+- 30
+- 60
+test_batch_size: 32
+test_feeder_args:
+    data_path: ../drive/MyDrive/Data/NWUCLA_SKE/all_sqe/
+    debug: false
+    label_path: val
+    temporal_rgb_frames: 5
+train_feeder_args:
+    data_path: ../drive/MyDrive/Data/NWUCLA_SKE/all_sqe/
+    debug: false
+    label_path: train
+    normalization: false
+    random_choose: true
+    random_move: false
+    random_shift: false
+    temporal_rgb_frames: 5
+    window_size: 52
+use_gpu: true
+weight_decay: 0.0001
+weights: ./result/nucla/CTROGC-GCN.pt
+work_dir: ./work_dir/nucla/cross_modal_attention

@@ -10,7 +10,7 @@ class Feeder(Dataset):
     def __init__(self, data_path=None, label_path=None, 
                  random_choose=False, random_shift=False, random_move=False,
                  window_size=-1, normalization=False, debug=False, use_mmap=True,
-                 temporal_rgb_frames=5, split='train'):
+                 temporal_rgb_frames=5, split='train', **kwargs):
         self.split = split
         self.debug = debug
         self.random_choose = random_choose
@@ -84,7 +84,7 @@ class Feeder(Dataset):
     def __getitem__(self, index):
         info = self.data_dict[index]
         name = info['file_name']
-        label = int(info['label'])
+        label = int(info['label']) - 1
         skeleton_path = os.path.join(self.skeleton_root, name + '.json')
         data_numpy = self.load_one_skeleton_file(skeleton_path)
         data_numpy = np.array(data_numpy)

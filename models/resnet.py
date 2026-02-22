@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from net.utils.util import load_state_dict_from_url
+from torch.hub import load_state_dict_from_url
 
 
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
