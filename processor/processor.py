@@ -49,6 +49,14 @@ class Processor(IO):
 
     def load_data(self):
         Feeder = import_class(self.arg.feeder)
+        
+        # Override data_path if provided via CLI
+        if hasattr(self.arg, 'data_path') and self.arg.data_path is not None:
+            if hasattr(self.arg, 'train_feeder_args') and isinstance(self.arg.train_feeder_args, dict):
+                self.arg.train_feeder_args['data_path'] = self.arg.data_path
+            if hasattr(self.arg, 'test_feeder_args') and isinstance(self.arg.test_feeder_args, dict):
+                self.arg.test_feeder_args['data_path'] = self.arg.data_path
+                
         if 'debug' not in self.arg.train_feeder_args:
             self.arg.train_feeder_args['debug'] = self.arg.debug
         self.data_loader = dict()
