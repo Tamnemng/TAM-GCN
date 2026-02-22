@@ -42,13 +42,13 @@ weights: ./result/nucla/CTROGC-GCN.pt
 weight_decay: 0.0001
 base_lr: 0.01 # Lower LR because Resnet is pretrained
 lr_decay_rate: 0.1
-step: [30, 60]
+step: [30]
 
 # training
 device: [0]
 batch_size: 16
 test_batch_size: 32
-num_epoch: 80
+num_epoch: 45
 nesterov: True
 eval_interval: 1
 save_interval: 5
