@@ -32,7 +32,7 @@ class IO():
         parser = self.get_parser()
 
         # load arg form config file
-        p = parser.parse_args(argv)
+        p, _ = parser.parse_known_args(argv)
         if p.config is not None:
             # load config file
             with open(p.config, 'r') as f:
@@ -47,7 +47,7 @@ class IO():
 
             parser.set_defaults(**default_arg)
 
-        self.arg = parser.parse_args(argv)
+        self.arg, _ = parser.parse_known_args(argv)
 
     def init_environment(self):
         self.io = torchlight.IO(
