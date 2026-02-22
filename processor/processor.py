@@ -184,6 +184,9 @@ class Processor(IO):
 
         parser.add_argument('-w', '--work_dir', default='./work_dir/tmp', help='the work folder for storing results')
         parser.add_argument('-c', '--config', default=None, help='path to the configuration file')
+        
+        # data override
+        parser.add_argument('--data_path', default=None, help='override the data_path defined in config for both train and test feeder args')
 
         # processor
         parser.add_argument('--phase', default='train', help='must be train or test')
