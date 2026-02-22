@@ -19,7 +19,9 @@ class Feeder(Dataset):
         self.window_size = window_size
         self.normalization = normalization
         self.temporal_rgb_frames = temporal_rgb_frames
-        self.data_path = kwargs.get('data_path', '../drive/MyDrive/Data/NW-UCLA-ALL')
+        
+        # Prefer the explicitly passed data_path, otherwise check kwargs
+        self.data_path = data_path if data_path is not None else kwargs.get('data_path', '../drive/MyDrive/Data/NW-UCLA-ALL')
         
         
         if self.split == 'val':
