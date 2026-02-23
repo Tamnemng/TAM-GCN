@@ -13,17 +13,23 @@ from models.ctrgcn import Model as CTRGCNModel
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-JSON_DATA_DIR = r'C:\Users\nguyn\Downloads\NW-UCLA-ALL\NW-UCLA-ALL'
 MODEL_WEIGHTS = './result/nucla/CTROGC-GCN.pt'
 
 PART_SIZE = 96
-# GCN_PART_INDEX tương ứng với ['head', 'l_hand', 'r_hand', 'l_leg', 'r_leg'] 
-# trong cấu hình 20 khớp của bộ dữ liệu NW-UCLA (0: head, 7: left hand, 11: right hand, 15: left leg, 19: right leg)
-GCN_PART_INDEX = [0, 7, 11, 15, 19]
+# Gom nhóm 20 khớp của bộ dữ liệu NW-UCLA thành 5 phần cơ thể chính (0-indexed)
+BODY_PARTS = {
+    'head_torso': [0, 1, 2, 3], # Hip Center, Spine, Shoulder Center, Head
+    'l_hand': [4, 5, 6, 7],     # Left Shoulder, Elbow, Wrist, Hand
+    'r_hand': [8, 9, 10, 11],   # Right Shoulder, Elbow, Wrist, Hand
+    'l_leg': [12, 13, 14, 15],  # Left Hip, Knee, Ankle, Foot
+    'r_leg': [16, 17, 18, 19]   # Right Hip, Knee, Ankle, Foot
+}
 
-def load_3d_skeleton(sample_name):
+PART_NAMES = list(BODY_PARTS.keys())
+
+def load_3d_skeleton(sample_name, json_data_dir):
     # Lấy 3D skeleton từ thư mục json chuẩn cho GCN
-    json_file = os.path.join(JSON_DATA_DIR, sample_name, sample_name + ".json")
+    json_file = os.path.join(json_data_dir, sample_name, sample_name + ".json")
     if not os.path.exists(json_file):
         return None
     try:
@@ -64,10 +70,11 @@ def hooked_forward(self, x, A=None, alpha=1):
     x1, x2, x3 = self.conv1(x).mean(-2), self.conv2(x).mean(-2), self.conv3(x)
     x1 = self.tanh(x1.unsqueeze(-1) - x2.unsqueeze(-2))
     # Sinh ra Ma trận kề Động của GCN mang đặc trưng quan hệ topology
-    A_dyn = self.conv4(x1) * alpha + (A.unsqueeze(0).unsqueeze(0) if A is not None else 0)
-    # Cất giấu nó đi để sau đó mình lôi ra dùng
+    A_dyn = self.conv4(x1) * alpha
+    # Cất giấu bản Động (Dynamic) đi để sau đó mình lôi ra dùng
     self.saved_A_dyn = A_dyn.detach()
-    out = torch.einsum('ncuv,nctv->nctu', A_dyn, x3)
+    A_full = A_dyn + (A.unsqueeze(0).unsqueeze(0) if A is not None else 0)
+    out = torch.einsum('ncuv,nctv->nctu', A_full, x3)
     return out
 
 def extract_related_parts(model, x_3d):
@@ -75,11 +82,13 @@ def extract_related_parts(model, x_3d):
     with torch.no_grad():
         model.extract_feature(x_tensor)
         
+    # Trích topology động từ layer 1 (hoặc thay bằng model.l10 tuỳ ý)
+    layer = getattr(model, 'l1')
     A_total = []
-    # Tổng kết 3 nhánh GCN ở layer đầu (l1) để xem Topology khởi tạo
-    for i in range(model.l1.gcn1.num_subset):
-        A_dyn = model.l1.gcn1.convs[i].saved_A_dyn # [1*1, C, V, V]
-        A_avg = A_dyn.mean(dim=(0, 1)) # [V, V]
+    
+    for i in range(layer.gcn1.num_subset):
+        A_dyn = layer.gcn1.convs[i].saved_A_dyn # [1, C, V, V]
+        A_avg = A_dyn.abs().mean(dim=(0, 1)) # Tính trung bình magnitude trên Channel -> [V, V]
         A_total.append(A_avg)
     A_total = torch.stack(A_total).mean(dim=0)
     
@@ -87,16 +96,19 @@ def extract_related_parts(model, x_3d):
     A_sym = (A_total + A_total.t()) / 2.0
     A_sym = A_sym.cpu().numpy()
     
-    # Rút trích quan hệ giữa 5 bộ phận (Head, Hands, Legs)
-    sub_A = np.zeros((5, 5))
-    for i in range(5):
-        for j in range(5):
-            sub_A[i, j] = A_sym[GCN_PART_INDEX[i], GCN_PART_INDEX[j]]
-    # Không cho một bộ phận liên kết với chính nó
-    np.fill_diagonal(sub_A, -np.inf)
+    # Gom 20 khớp thành ma trận 5x5 đại diện cho 5 bộ phận
+    part_matrix = np.zeros((5, 5))
+    for i, p1 in enumerate(PART_NAMES):
+        for j, p2 in enumerate(PART_NAMES):
+            idx1 = BODY_PARTS[p1]
+            idx2 = BODY_PARTS[p2]
+            sub_A = A_sym[np.ix_(idx1, idx2)]
+            part_matrix[i, j] = np.sum(sub_A)
+            
+    np.fill_diagonal(part_matrix, -np.inf)
     
-    # Bộ phận nào liên kết với bộ phận nào được điểm cao nhất?
-    flat_idx = np.argmax(sub_A)
+    # Bộ phận nào liên kết mạnh nhất?
+    flat_idx = np.argmax(part_matrix)
     c1, c2 = divmod(flat_idx, 5)
     return c1, c2
 
@@ -123,7 +135,7 @@ def highlight_rows(image, r1, r2, color=(200, 200, 0, 75)):
     image = Image.alpha_composite(image, overlay)
     return image.convert('RGB')
 
-def process_all(input_dir, output_dir):
+def process_all(input_dir, output_dir, json_data_dir):
     if not os.path.exists(input_dir):
         print(f"LỖI: Thư mục chứa ảnh Stroi '{input_dir}' không tồn tại!")
         print("Hãy chạy gen_ucla_stroi.py trước hoặc cung cấp đúng đường dẫn với biến --input_dir")
@@ -175,7 +187,7 @@ def process_all(input_dir, output_dir):
             continue
             
         # 2. Xử lý Skeleton vào GCN
-        x_3d = load_3d_skeleton(sample_name)
+        x_3d = load_3d_skeleton(sample_name, json_data_dir)
         if x_3d is not None:
             c1, c2 = extract_related_parts(model, x_3d)
             tbar.set_description(f"Cặp ({c1}, {c2}) - {sample_name}")
@@ -197,6 +209,7 @@ if __name__ == '__main__':
     # Thay đổi mặc định dựa theo logic code cũ gen_ucla_stroi.py (của bản thân user) 
     parser.add_argument('--input_dir', type=str, default='/ucla_stroi', help='Thư mục chứa ảnh 5x5 Stroi đầu vào')
     parser.add_argument('--output_dir', type=str, default='./ucla_stroi_topology', help='Thư mục chứa ảnh đã tô màu')
+    parser.add_argument('--JSON_DATA_DIR', type=str, default=r'C:\Users\nguyn\Downloads\NW-UCLA-ALL\NW-UCLA-ALL', help='Thư mục chứa file JSON 3D Skeletons của UCLA')
     args = parser.parse_args()
     
-    process_all(args.input_dir, args.output_dir)
+    process_all(args.input_dir, args.output_dir, args.JSON_DATA_DIR)
