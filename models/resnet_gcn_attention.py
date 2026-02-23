@@ -56,12 +56,21 @@ class ResNet_GCN_Attention(nn.Module):
         self.resnet.avgpool = nn.Identity()
         
         # 3. Cross-Modal Attention Module
-        # We want to transform the 256-d GCN feature into a 2048-d channel attention vector
-        self.attention_transform = nn.Sequential(
+        # We transform the 256-d GCN feature into a 2048-d channel attention vector
+        self.channel_attention = nn.Sequential(
             nn.Linear(gcn_feature_dim, resnet_feature_dim // 2),
             nn.BatchNorm1d(resnet_feature_dim // 2),
             nn.ReLU(inplace=True),
             nn.Linear(resnet_feature_dim // 2, resnet_feature_dim),
+            nn.Sigmoid() 
+        )
+        
+        # Spatial Attention: Transform 256-d GCN feature into a 7x7 spatial mask
+        self.spatial_attention = nn.Sequential(
+            nn.Linear(gcn_feature_dim, 49), # 7*7 = 49
+            nn.BatchNorm1d(49),
+            nn.ReLU(inplace=True),
+            nn.Linear(49, 49),
             nn.Sigmoid() # Scale values between 0 and 1
         )
         
@@ -85,11 +94,13 @@ class ResNet_GCN_Attention(nn.Module):
         # Pool across Time (T), Joints (V), and Person (M) to get a single vector per video
         f_gcn = f_gcn.mean(dim=(2, 3, 4)) # Shape: [N, 256]
         
-        # Generate Attention Weights
-        # Shape: [N, 2048]
-        att_weights = self.attention_transform(f_gcn) 
-        # Reshape for broadcasting over the spatial grid [N, 2048, 1, 1]
-        att_weights = att_weights.unsqueeze(-1).unsqueeze(-1) 
+        # Generate Channel Attention Weights [N, 2048]
+        ch_att_weights = self.channel_attention(f_gcn) 
+        ch_att_weights = ch_att_weights.unsqueeze(-1).unsqueeze(-1) # [N, 2048, 1, 1]
+        
+        # Generate Spatial Attention Weights [N, 49] -> [N, 1, 7, 7]
+        sp_att_weights = self.spatial_attention(f_gcn)
+        sp_att_weights = sp_att_weights.view(-1, 1, 7, 7)
         
         # ==================================
         # 2. Extract ResNet Spatial Maps
@@ -107,10 +118,13 @@ class ResNet_GCN_Attention(nn.Module):
         # Shape: [N, 2048, 7, 7]
         
         # ==================================
-        # 3. Apply Cross-Modal Attention
+        # 3. Apply Cross-Modal Attention (Spatial + Channel)
         # ==================================
-        # Multiply ResNet feature maps by GCN-derived attention weights
-        f_attended = f_rgb * att_weights 
+        # Mutiply by Channel Attention (What to look for)
+        f_attended = f_rgb * ch_att_weights 
+        
+        # Multiply by Spatial Attention (Where to look)
+        f_attended = f_attended * sp_att_weights
         
         # ==================================
         # 4. Classification

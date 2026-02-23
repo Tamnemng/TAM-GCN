@@ -1,152 +1,130 @@
+import sys
 import os
-import argparse
-import yaml
 import torch
-import torch.nn.functional as F
 import numpy as np
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-from torchlight.torchlight.io import import_class
 import cv2
+import matplotlib.pyplot as plt
 
-# Hardcoded imports for standard TAM setup
+# import model and data feeder
 from models.resnet_gcn_attention import ResNet_GCN_Attention
+from feeder.feeder_nucla_fusion import Feeder
 
-def get_parser():
-    parser = argparse.ArgumentParser(description='Visualize Cross-Modal Attention Distribution')
-    parser.add_argument('--config', '-c', default='config/nucla/cross_modal.yaml', help='path to the configuration file')
-    parser.add_argument('--weights', default='result/nucla/cross_model.pt', help='path to the model weights')
-    parser.add_argument('--data_path', default='../../input/datasets/nguyenductamhehe/nwucla/NW-UCLA-ALL', help='path to the local NW-UCLA dataset')
-    parser.add_argument('--output_dir', default='./visualizations', help='where to save output heatmaps')
-    parser.add_argument('--sample_idx', type=int, default=0, help='Which sample in the val set to visualize')
-    return parser.parse_args()
+# To avoid "graph module not found" error during dynamic import in CTRGCN
+sys.path.append('./')
 
-def load_data(config, data_path):
-    Feeder = import_class(config['feeder'])
-    test_args = config['test_feeder_args']
-    test_args['data_path'] = data_path
-    
-    dataset = Feeder(**test_args)
-    return dataset
+def normalize_map(m):
+    m = m - m.min()
+    m = m / (m.max() + 1e-7)
+    return m
 
-def draw_heatmap(rgb_frames, attention_weights, output_path):
-    # rgb_frames (C, T, H, W) where C=3, T=5 -> We want to shape it visually
-    # attention_weights will just be a set of scales applied to the resnet layers (usually channel-wise).
-    # Since resnet applies spatial convs later, the true spatial heatmap requires Grad-CAM.
-    # For now, let's visualize the raw channel activation profile by GCN vs without GCN.
+def visualize_attention(data_path, output_dir='./visualizations'):
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Loading data from {data_path}...")
     
-    # We will use Grad-CAM conceptually for the last conv block of ResNet to see where it looks
-    pass
-
-def main():
-    args = get_parser()
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-        
-    os.makedirs(args.output_dir, exist_ok=True)
+    # 1. Initialize the Feeder (Dataset)
+    feeder = Feeder(
+        data_path=data_path,
+        split='val',
+        debug=True, 
+        random_choose=False,
+        random_shift=False,
+        random_move=False,
+        window_size=52,
+        normalization=False,
+        temporal_rgb_frames=5 # We are loading 5 RGB frames per sample
+    )
     
-    print("Loading Model...")
-    model_args = config['model_args']
-    model = import_class(config['model'])(**model_args)
-    
-    # Load Weights
-    print(f"Loading weights from {args.weights}")
-    weights = torch.load(args.weights, map_location='cpu')
-    model.load_state_dict(weights)
+    # Get a few samples
+    print("\nInitializing ResNet_GCN_Attention Model...")
+    model = ResNet_GCN_Attention(
+        num_class=10, 
+        num_point=20, 
+        num_person=1, 
+        graph='graph.ucla.Graph',
+        graph_args={'labeling_mode': 'spatial'},
+        in_channels_gcn=3,
+        in_channels_rgb=15, 
+        drop_out=0,
+        adaptive=True,
+        freeze_gcn=True
+    )
     model.eval()
     
-    feature_maps = []
-    attention_scales = []
-    
-    def hook_feature(module, input, output):
-        feature_maps.append(output.detach())
+    # Try to load pretrained weights for GCN to get meaningful attention
+    # Without trained Spatial-Attention weights, the 7x7 map will look random,
+    # but we can still visualize the mechanism.
+    try:
+        weights = torch.load('./result/nucla/CTROGC-GCN.pt')
+        model.gcn.load_state_dict(weights)
+        print("Pretrained GCN weights loaded successfully.")
+    except Exception as e:
+        print(f"Note: Pretrained GCN weights not loaded ({e}).")
         
-    def hook_attention(module, input, output):
-        attention_scales.append(output.detach())
+    # We will process 3 different samples to see the effect
+    for sample_idx in range(3):
+        data, label, index = feeder[sample_idx]
+        x_gcn = torch.tensor(data[0]).unsqueeze(0).float() # [1, 3, 52, 20, 1]
+        x_rgb = torch.tensor(data[1]).unsqueeze(0).float() # [1, 15, 224, 224]
         
-    model.resnet.layer4.register_forward_hook(hook_feature)
-    model.attention_transform.register_forward_hook(hook_attention)
-    
-    print("Loading DataLoader...")
-    # Load the TRAIN split to find 'v02' samples
-    Feeder = import_class(config['feeder'])
-    train_args = config['train_feeder_args']
-    train_args['data_path'] = args.data_path
-    train_args['split'] = 'train'
-    dataset = Feeder(**train_args)
-    
-    # Find specific user sample
-    target_sample = 'a12_s10_e02_v02'
-    if target_sample in dataset.sample_name:
-        sample_idx = dataset.sample_name.index(target_sample)
-    else:
-        print(f"Sample {target_sample} not found! Fallback to index 10")
-        sample_idx = 10
+        print(f"\nProcessing Sample {sample_idx+1} (Label: {label})...")
         
-    data, label, idx = dataset[sample_idx]
-    ske_data = torch.tensor(data[0]).unsqueeze(0).float()
-    rgb_data = torch.tensor(data[1]).unsqueeze(0).float()
-    
-    print(f"Running Inference on: {dataset.sample_name[sample_idx]}...")
-    with torch.no_grad():
-        out = model(ske_data, rgb_data)
-        
-    print(f"Predicted Class: {out.argmax(-1).item()}, True Class: {label}")
-    
-    # Feature Map is shape (1, 2048, H, W)
-    fmap = feature_maps[0]
-    # Attention array is (1, 2048) -> applied to channels
-    att = attention_scales[0]
-    
-    # Generate weighted CAM (Class Activation Map-like)
-    # Multiply the spatial 2D feature maps by the GCN channel attention coefficients
-    weighted_fmap = fmap * att.view(1, -1, 1, 1)
-    
-    plt.figure(figsize=(10, 4))
-    plt.plot(att.squeeze().numpy()[:200]) # Plot first 200 channels
-    plt.title("GCN Channel Attention Multipliers (First 200 Channels of ResNet50)")
-    plt.xlabel("Channel Index")
-    plt.ylabel("Multiplier Coefficient")
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.output_dir, 'gcn_channel_attention.png'))
-    plt.close()
-    
-    # We collapse the (1, 2048, H', W') to (1, H', W') array representing the final spatial heatmap
-    spatial_map = weighted_fmap.mean(dim=1).squeeze().numpy()
-    spatial_map = np.maximum(spatial_map, 0)
-    spatial_map = spatial_map / np.max(spatial_map)
-    spatial_map_resized = cv2.resize(spatial_map, (rgb_data.shape[-1], rgb_data.shape[-2]))
-    heatmap = cv2.applyColorMap(np.uint8(255 * spatial_map_resized), cv2.COLORMAP_JET)
-    heatmap = np.float32(heatmap) / 255
-    
-    # Plot 5 Frames overlay
-    fig, axes = plt.subplots(1, 5, figsize=(20, 5))
-    
-    rgb_numpy = rgb_data.squeeze().numpy() # (15, 224, 224)
-    # The normalisation usually is ImageNet normalisation, but we can approximate it back for display
-    mean = np.array([0.485, 0.456, 0.406]).reshape(3,1,1)
-    std = np.array([0.229, 0.224, 0.225]).reshape(3,1,1)
-    
-    for t in range(5):
-        # RGB early fusion packs 15 channels (5 frames * 3 colors)
-        frame = rgb_numpy[t*3:(t+1)*3, :, :] # (3, 224, 224)
-        frame = frame * std + mean
-        frame = np.clip(frame, 0, 1)
-        frame = frame.transpose(1, 2, 0) # (224, 224, 3)
-        
-        # Combine true image and spatial heatmap
-        # NOTE: The heatmap is identical for all 5 frames because Early Fusion (15-chan input)
-        # collapses the temporal dimension at the very first layer of ResNet!
-        superimposed_img = heatmap * 0.4 + frame * 0.6
-        superimposed_img = superimposed_img / np.max(superimposed_img)
-        
-        axes[t].imshow(cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB) if False else superimposed_img)
-        axes[t].axis('off')
-        axes[t].set_title(f"Time T={t} (Aggregated Spatial Attn)")
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.output_dir, 'spatial_heatmap_frames.png'))
-    print(f"Saved visualizations to {args.output_dir}")
+        with torch.no_grad():
+            # Extract GCN features and compute spatial mask
+            f_gcn, _ = model.gcn.extract_feature(x_gcn) 
+            f_gcn = f_gcn.mean(dim=(2, 3, 4)) # [1, 256]
+            
+            # This is the 1x1x7x7 mask that tells ResNet WHERE to look
+            sp_att_weights = model.spatial_attention(f_gcn) # [1, 49]
+            sp_att_weights = sp_att_weights.view(-1, 1, 7, 7) # [1, 1, 7, 7]
+            
+            # Convert to numpy for visualization
+            spatial_mask = sp_att_weights[0, 0].numpy() # [7, 7]
+            
+            # The spatial mask is 7x7. We need to resize it to 224x224 to overlay it on the image
+            spatial_mask_resized = cv2.resize(spatial_mask, (224, 224), interpolation=cv2.INTER_CUBIC)
+            spatial_mask_normalized = normalize_map(spatial_mask_resized)
+            
+            # Apply color map
+            heatmap = cv2.applyColorMap(np.uint8(255 * spatial_mask_normalized), cv2.COLORMAP_JET)
+            heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB) # Convert to RGB for matplotlib
+            
+            # Now, let's look at the RGB frames.
+            # x_rgb is [1, 15, 224, 224], which is 5 frames of 3 channels (RGB) stacked together
+            frames_tensor = x_rgb[0].view(5, 3, 224, 224) 
+            
+            # We will plot the middle frame (frame 2) as the representative frame
+            frame = frames_tensor[2].permute(1, 2, 0).numpy()
+            
+            # The images in the feeder are usually normalized (e.g. ImageNet mean/std) or in [0, 1] / [0, 255]
+            # Let's cleanly map to [0, 1] for visualization
+            frame = normalize_map(frame)
+            
+            # Create an overlaid image: Original Frame + Heatmap
+            overlay = frame * 0.5 + (heatmap / 255.0) * 0.5
+            
+            # Plot
+            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+            fig.suptitle(f"Sample {sample_idx+1} (Action Label: {label}) - Spatial Attention Mechanism", fontsize=16)
+            
+            axs[0].imshow(frame)
+            axs[0].set_title("1. Original RGB Frame")
+            axs[0].axis('off')
+            
+            axs[1].imshow(heatmap)
+            axs[1].set_title("2. Spatial Attention Mask (7x7 -> 224x224)\n(Generated by GCN from Skeleton)")
+            axs[1].axis('off')
+            
+            axs[2].imshow(overlay)
+            axs[2].set_title("3. Overlaid Result\n(What ResNet sees after multiplication)")
+            axs[2].axis('off')
+            
+            save_path = os.path.join(output_dir, f'attention_sample_{sample_idx}.png')
+            plt.savefig(save_path, bbox_inches='tight')
+            plt.close()
+            print(f"Saved visualization to {save_path}")
+            
+    print(f"\nAll visualizations completed. Check the '{output_dir}' folder.")
 
 if __name__ == '__main__':
-    main()
+    data_path = r'C:\Users\nguyn\Downloads\NW-UCLA-ALL\NW-UCLA-ALL'
+    visualize_attention(data_path)
