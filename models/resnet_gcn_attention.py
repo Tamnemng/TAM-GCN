@@ -67,6 +67,7 @@ class ResNet_GCN_Attention(nn.Module):
         
         # 4. Final Classifier
         self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.dropout = nn.Dropout(p=0.5)
         self.classifier = nn.Linear(resnet_feature_dim, num_class)
         
     def forward(self, x_gcn, x_rgb):
@@ -117,6 +118,7 @@ class ResNet_GCN_Attention(nn.Module):
         out = self.global_pool(f_attended) # Shape: [N, 2048, 1, 1]
         out = torch.flatten(out, 1)        # Shape: [N, 2048]
         
+        out = self.dropout(out)
         out = self.classifier(out)         # Shape: [N, num_class]
         
         return out

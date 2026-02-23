@@ -7,8 +7,8 @@ train_feeder_args:
   split: train
   debug: False
   random_choose: True
-  random_shift: False
-  random_move: False
+  random_shift: True
+  random_move: True
   window_size: 52
   normalization: False
   temporal_rgb_frames: 5
@@ -39,10 +39,11 @@ model_args:
 weights: ./result/nucla/CTROGC-GCN.pt
 
 # optim
-weight_decay: 0.0001
-base_lr: 0.01 # Lower LR because Resnet is pretrained
-lr_decay_rate: 0.1
-step: [30, 60]
+weight_decay: 0.0004
+base_lr: 0.0001 # Reduced to prevent Resnet overfitting
+lr_decay_rate: 0.5
+step: [15, 30]
+optimizer: Adam
 
 # training
 device: [0]
