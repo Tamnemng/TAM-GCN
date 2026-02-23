@@ -114,17 +114,27 @@ class REC_Processor(Processor):
 
     def load_weights(self):
         if self.arg.weights:
-            self.io.print_log(f'Loading CTR-GCN structural weights from {self.arg.weights}')
             weights = torch.load(self.arg.weights)
-            try:
-                # the model name in our new ResNet_GCN_Attention is self.gcn
-                if hasattr(self.model, 'module'):
-                    self.model.module.gcn.load_state_dict(weights) 
-                else:
-                    self.model.gcn.load_state_dict(weights)
-                self.io.print_log("Load CTR-GCN weights success!")
-            except Exception as e:
-                self.io.print_log(f"Warning load GCN weights: {e}")
+            
+            is_full_model = False
+            if isinstance(weights, dict):
+                if any(k.startswith('resnet.') or k.startswith('gcn.') or k.startswith('attention_transform.') for k in weights.keys()):
+                    is_full_model = True
+
+            if is_full_model:
+                self.io.print_log(f'Loading full model weights from {self.arg.weights}')
+                super().load_weights()
+            else:
+                self.io.print_log(f'Loading CTR-GCN structural weights from {self.arg.weights}')
+                try:
+                    # the model name in our new ResNet_GCN_Attention is self.gcn
+                    if hasattr(self.model, 'module'):
+                        self.model.module.gcn.load_state_dict(weights) 
+                    else:
+                        self.model.gcn.load_state_dict(weights)
+                    self.io.print_log("Load CTR-GCN weights success!")
+                except Exception as e:
+                    self.io.print_log(f"Warning load GCN weights: {e}")
 
     def start(self):
         # Allow parent to set up everything

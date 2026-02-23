@@ -227,19 +227,20 @@ def load_rgb_images(data_path, name, temporal_rgb_frames, size=224):
     seq_dir = os.path.join(data_path, name)
     try:
         # Lấy tất cả các frame jpg trong folder
-        frames = glob.glob(os.path.join(seq_dir, 'frame_*_rgb.jpg'))
+        frames = glob.glob(os.path.join(seq_dir, '*_rgb.jpg'))
         if not frames:
             frames = glob.glob(os.path.join(seq_dir, '*.jpg'))
             if not frames:
                 raise FileNotFoundError(f"Không tìm thấy frame nào trong {seq_dir}")
                 
         # Sắp xếp các frame theo thứ tự thời gian (ID integer)
+        # Format filename: frame_463_tc_11904841_rgb.jpg -> split('_')[1] = '463'
         def get_frame_num(f):
             try:
                 base = os.path.basename(f)
                 return int(base.split('_')[1])
             except:
-                return f
+                return 0
         frames = sorted(frames, key=get_frame_num)
         
         # Parse evenly spaced frames
