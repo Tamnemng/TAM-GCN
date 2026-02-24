@@ -83,19 +83,25 @@ def extract_spatio_temporal_weights(model, x_3d):
     for t in range(T):
         for i, p_name in enumerate(PART_NAMES):
             idx = BODY_PARTS[p_name]
-            # Lấy giá trị lớn nhất (để không bị hoà tan tín hiệu) hoặc trung bình của nhóm khớp trong frame đó
-            part_weights[t, i] = np.mean(weight_tv[t, idx])
+            # Sửa đổi: Lấy giá trị lớn nhất (np.max) thay vì trung bình (np.mean)
+            # Giúp không làm loãng tín hiệu của các khớp chuyển động mạnh nhất trong nhóm (ví dụ: cổ tay ở label 8 - Throw)
+            part_weights[t, i] = np.max(weight_tv[t, idx])
             
-    # Chuẩn hoá (Min-Max Normalize) từng block frame [T, 5] về khoảng [0, 1]
-    w_min = np.min(part_weights)
+    # Chuẩn hoá
     w_max = np.max(part_weights)
-    if w_max > w_min:
-        part_weights = (part_weights - w_min) / (w_max - w_min)
+    if w_max > 0:
+        # Chỉ chia cho max, không trừ min để giữ nguyên tỷ lệ tương đối từ 0
+        # Điều này giúp các bộ phận ít chuyển động không bị xóa sổ thành 0 gốc
+        part_weights = part_weights / w_max
     else:
         part_weights = np.ones((T, 5))
         
-    # Áp dụng ngưỡng dưới để ảnh không bị tối đen hoàn toàn (Ví dụ: giữ cường độ thấp nhất là 30%)
-    MIN_INTENSITY = 0.3
+    # Áp dụng hàm lượng phi tuyến tính (power) để nâng các giá trị kích hoạt mức trung bình lên
+    # Giúp các hành động toàn thân như 'Walk around' (3) hay 'Carry' (9) không bị mờ nhạt
+    part_weights = np.power(part_weights, 0.7)
+        
+    # Tăng cường độ mờ thấp nhất từ 0.3 lên 0.45 để ResNet50 vẫn thấy rõ bối cảnh các quỹ đạo gốc
+    MIN_INTENSITY = 0.45
     part_weights = part_weights * (1.0 - MIN_INTENSITY) + MIN_INTENSITY
     
     return part_weights
