@@ -106,18 +106,40 @@ def extract_spatio_temporal_weights(model, x_3d):
     
     return part_weights
 
-def apply_soft_weighting(image, weights, interpolation=Image.BILINEAR):
-    # weights shape: [T, 5]
-    # Ma trận weights tương ứng với ảnh. T chiều ngang (Thời gian), 5 chiều dọc (5 nhóm bộ phận cơ thể)
+def apply_soft_weighting(image, weights):
+    # weights shape: [T, 5] (T là số frame của GCN, thường là 52)
+    # STROI ảnh gốc thực chất là một ma trận Grid 5x5: 5 cột (5 frames thời gian) x 5 hàng (5 bộ phận cơ thể)
     
-    # Transpose thành [5, T] (H, W) để gán cho ma trận ảnh
+    # Transpose thành [5, T] (H, W) để gán cho ma trận ảnh (5 hàng, T cột)
     weights_img = weights.T 
     
-    # Zoom mượt ma trận 5x52 này lên vừa bằng pixel ảnh STROI (480x480)
-    w_image = Image.fromarray(np.uint8(weights_img * 255), mode='L')
-    w_mask = w_image.resize((image.width, image.height), resample=interpolation)
+    # Bước 1: Thu gọn chiều T (52 frames) về 5 block thời gian cho khớp với 5 cột của STROI
+    _, T = weights_img.shape
+    num_frames_stroi = 5
     
-    # Áp Mask vào ảnh chuẩn
+    # Tạo ma trận 5x5
+    w_5x5 = np.zeros((5, num_frames_stroi))
+    
+    if T < num_frames_stroi:
+        # Fallback nếu T quá nhỏ
+        w_5x5[:, :T] = weights_img
+        for i in range(T, num_frames_stroi):
+            w_5x5[:, i] = weights_img[:, -1]
+    else:
+        # Chia T frame thành 5 chunk đều nhau và lấy trung bình trọng số trong chunk đó
+        step = T / num_frames_stroi
+        for i in range(num_frames_stroi):
+            start = int(i * step)
+            end = int((i + 1) * step) if i < num_frames_stroi - 1 else T
+            w_5x5[:, i] = np.mean(weights_img[:, start:end], axis=1)
+            
+    # Bước 2: Phóng to ma trận 5x5 lên kích thước pixel ảnh (ví dụ 5 cột x 96, 5 hàng x 96 = 480x480)
+    # Dùng NEAREST để giữ nguyên hình khối ô vuông tĩnh (Grid patch), không làm mờ nhoè (blend) 
+    # sang các ô thời gian hoặc bộ phận cơ thể khác
+    w_image = Image.fromarray(np.uint8(w_5x5 * 255), mode='L')
+    w_mask = w_image.resize((image.width, image.height), resample=Image.NEAREST)
+    
+    # Bước 3: Áp Mask vào ảnh chuẩn
     img_np = np.array(image.convert('RGB')).astype(np.float32)
     mask_np = np.array(w_mask).astype(np.float32) / 255.0
     mask_np = np.expand_dims(mask_np, axis=2)
