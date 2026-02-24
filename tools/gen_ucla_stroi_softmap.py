@@ -88,17 +88,18 @@ def extract_spatio_temporal_weights(model, x_3d):
             part_weights[t, i] = np.max(weight_tv[t, idx])
             
     # Chuẩn hoá
-    w_max = np.max(part_weights)
-    if w_max > 0:
-        # Chỉ chia cho max, không trừ min để giữ nguyên tỷ lệ tương đối từ 0
-        # Điều này giúp các bộ phận ít chuyển động không bị xóa sổ thành 0 gốc
-        part_weights = part_weights / w_max
+    # Bóp méo phi tuyến tính (Log transform) để giảm sự chênh lệch cực lớn giữa cường độ thấp và cao
+    part_weights = np.log1p(part_weights)
+    
+    w_min = np.min(part_weights)
+    w_max = np.percentile(part_weights, 95) # Dùng bách phân vị 95 triệt tiêu các đỉnh quá lớn gây nhiễu
+    
+    if w_max > w_min:
+        # Có trừ đi Min để khôi phục lại độ tương phản (có vùng tối, vùng sáng)
+        part_weights = (part_weights - w_min) / (w_max - w_min)
+        part_weights = np.clip(part_weights, 0, 1) # Giới hạn những điểm vượt đỉnh ở 1.0
     else:
         part_weights = np.ones((T, 5))
-        
-    # Áp dụng hàm lượng phi tuyến tính (power) để nâng các giá trị kích hoạt mức trung bình lên
-    # Giúp các hành động toàn thân như 'Walk around' (3) hay 'Carry' (9) không bị mờ nhạt
-    part_weights = np.power(part_weights, 0.7)
         
     # Tăng cường độ mờ thấp nhất từ 0.3 lên 0.45 để ResNet50 vẫn thấy rõ bối cảnh các quỹ đạo gốc
     MIN_INTENSITY = 0.45
