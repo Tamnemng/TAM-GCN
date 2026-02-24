@@ -29,15 +29,17 @@ class Model(nn.Module):
                 for j, v in enumerate([3, 11, 7, 18, 14]):
                     # use TOP 10 values along the temporal dimension
                     feature = feature_s[n, :, v, 0]
-                    temp = np.partition(-feature, self.temporal_positions)
-                    feature = -temp[:self.temporal_positions].mean()
+                    kth = min(self.temporal_positions, feature.shape[0] - 1)
+                    temp = np.partition(-feature, kth)
+                    feature = -temp[:kth].mean()
                     weight[n, 0, 45*j:45*(j+1), :] = feature[np.newaxis, np.newaxis]
             else:
                 for j, v in enumerate([3, 11, 7, 18, 14]):
                     # use TOP 10 values along the temporal dimension
                     feature = feature_s[n, :, v, 1]
-                    temp = np.partition(-feature, self.temporal_positions)
-                    feature = -temp[:self.temporal_positions].mean()
+                    kth = min(self.temporal_positions, feature.shape[0] - 1)
+                    temp = np.partition(-feature, kth)
+                    feature = -temp[:kth].mean()
                     weight[n, 0, 45*j:45*(j+1), :] = feature[np.newaxis, np.newaxis]
 
         weight_cuda = torch.from_numpy(weight).float().cuda()
