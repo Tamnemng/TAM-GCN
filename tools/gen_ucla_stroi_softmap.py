@@ -39,7 +39,7 @@ def load_3d_skeleton(sample_name, json_data_dir):
         elif 'data' in v_info:
             skel_data = np.array(v_info['data'])
         else:
-            return None
+            return None, None
         
         if len(skel_data.shape) == 2:
             T, _ = skel_data.shape
@@ -51,18 +51,18 @@ def load_3d_skeleton(sample_name, json_data_dir):
         data_numpy = np.expand_dims(data_numpy, axis=-1) 
         
         # padding/trimming to exactly 52 frames cho GCN
-        C, T, V, M = data_numpy.shape
+        C, T_orig, V, M = data_numpy.shape
         window_size = 52
-        if T < window_size:
-            pad = np.zeros((C, window_size - T, V, M))
+        if T_orig < window_size:
+            pad = np.zeros((C, window_size - T_orig, V, M))
             data_numpy = np.concatenate((data_numpy, pad), axis=1)
-        elif T > window_size:
-            begin = (T - window_size) // 2
+        elif T_orig > window_size:
+            begin = (T_orig - window_size) // 2
             data_numpy = data_numpy[:, begin:begin+window_size, :, :]
             
-        return data_numpy
+        return data_numpy, T_orig
     except Exception as e:
-        return None
+        return None, None
 
 def extract_spatio_temporal_weights(model, x_3d):
     x_tensor = torch.tensor(x_3d).unsqueeze(0).float().to(device)
@@ -88,16 +88,12 @@ def extract_spatio_temporal_weights(model, x_3d):
             part_weights[t, i] = np.max(weight_tv[t, idx])
             
     # Chuẩn hoá
-    # Bóp méo phi tuyến tính (Log transform) để giảm sự chênh lệch cực lớn giữa cường độ thấp và cao
-    part_weights = np.log1p(part_weights)
-    
     w_min = np.min(part_weights)
-    w_max = np.percentile(part_weights, 95) # Dùng bách phân vị 95 triệt tiêu các đỉnh quá lớn gây nhiễu
+    w_max = np.max(part_weights) 
     
     if w_max > w_min:
-        # Có trừ đi Min để khôi phục lại độ tương phản (có vùng tối, vùng sáng)
         part_weights = (part_weights - w_min) / (w_max - w_min)
-        part_weights = np.clip(part_weights, 0, 1) # Giới hạn những điểm vượt đỉnh ở 1.0
+        part_weights = np.clip(part_weights, 0, 1) 
     else:
         part_weights = np.ones((T, 5))
         
@@ -107,36 +103,38 @@ def extract_spatio_temporal_weights(model, x_3d):
     
     return part_weights
 
-def apply_soft_weighting(image, weights):
-    # weights shape: [T, 5] (T là số frame của GCN, thường là 52)
-    # STROI ảnh gốc thực chất là một ma trận Grid 5x5: 5 cột (5 frames thời gian) x 5 hàng (5 bộ phận cơ thể)
-    
-    # Transpose thành [5, T] (H, W) để gán cho ma trận ảnh (5 hàng, T cột)
+def apply_soft_weighting(image, weights, T_orig):
+    # weights shape: [T, 5] (thường T=52)
     weights_img = weights.T 
-    
-    # Bước 1: Thu gọn chiều T (52 frames) về 5 block thời gian cho khớp với 5 cột của STROI
     _, T = weights_img.shape
-    num_frames_stroi = 5
     
-    # Tạo ma trận 5x5
+    num_frames_stroi = 5
     w_5x5 = np.zeros((5, num_frames_stroi))
     
-    if T < num_frames_stroi:
-        # Fallback nếu T quá nhỏ
-        w_5x5[:, :T] = weights_img
-        for i in range(T, num_frames_stroi):
-            w_5x5[:, i] = weights_img[:, -1]
-    else:
-        # Chia T frame thành 5 chunk đều nhau và lấy trung bình trọng số trong chunk đó
-        step = T / num_frames_stroi
-        for i in range(num_frames_stroi):
-            start = int(i * step)
-            end = int((i + 1) * step) if i < num_frames_stroi - 1 else T
-            w_5x5[:, i] = np.mean(weights_img[:, start:end], axis=1)
+    # STROI chọn 5 frame cách đều nhau từ T_orig gốc của video
+    step = T_orig / num_frames_stroi
+    stroi_indices = [int(i * step) for i in range(num_frames_stroi)]
+    
+    for i, orig_idx in enumerate(stroi_indices):
+        if T_orig < 52:
+            # Nếu sequence ngắn < 52, GCN copy nguyên bản và pad zero vào đằng sau
+            gcn_idx = orig_idx
+        else:
+            # Nếu sequence dài > 52, GCN cắt phần giữa (center crop)
+            begin = (T_orig - 52) // 2
+            gcn_idx = orig_idx - begin
             
-    # Bước 2: Phóng to ma trận 5x5 lên kích thước pixel ảnh (ví dụ 5 cột x 96, 5 hàng x 96 = 480x480)
-    # Dùng NEAREST để giữ nguyên hình khối ô vuông tĩnh (Grid patch), không làm mờ nhoè (blend) 
-    # sang các ô thời gian hoặc bộ phận cơ thể khác
+        # Giới hạn gcn_idx trong khoảng [0, T-1] (0 đến 51)
+        gcn_idx = max(0, min(T - 1, gcn_idx))
+        
+        # Bắt lấy đỉnh chuyển động trong một cửa sổ nhỏ +/- 2 frames xung quanh frame hiện tại
+        idx_start = max(0, gcn_idx - 2)
+        idx_end = min(T, gcn_idx + 3)
+        
+        # Lấy MAX trong cửa sổ để không bỏ sót các gai chuyển động cực nhanh (vd: ném)
+        w_5x5[:, i] = np.max(weights_img[:, idx_start:idx_end], axis=1)
+            
+    # Phóng to ma trận trọng số 5x5 lên kích thước pixel ảnh bằng NEAREST để giữ nguyên các ô Grid
     w_image = Image.fromarray(np.uint8(w_5x5 * 255), mode='L')
     w_mask = w_image.resize((image.width, image.height), resample=Image.NEAREST)
     
@@ -194,13 +192,13 @@ def process_all(input_dir, output_dir, json_data_dir):
             continue
             
         # 2. Xử lý Skeleton vào GCN
-        x_3d = load_3d_skeleton(sample_name, json_data_dir)
+        x_3d, T_orig = load_3d_skeleton(sample_name, json_data_dir)
         if x_3d is not None:
             # Lấy ma trận trọng số [T, 5]
             weights = extract_spatio_temporal_weights(model, x_3d)
             
             # Áp dụng nhân soft masking (Làm tối ảnh mượt mà) thay vì tô màu vàng
-            weighted_img = apply_soft_weighting(img, weights)
+            weighted_img = apply_soft_weighting(img, weights, T_orig)
             
             save_path = os.path.join(output_dir, img_file)
             weighted_img.save(save_path)
