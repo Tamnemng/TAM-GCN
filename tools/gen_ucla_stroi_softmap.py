@@ -70,37 +70,21 @@ def extract_spatio_temporal_weights(model, x_3d):
         # Trích xuất Feature Map từ layer cuối cùng (chứa cả Spatial & Temporal info)
         feat, _ = model.extract_feature(x_tensor)
         
-    # feat shape: [N, C, T, V, M], N=1, M=1
     feat_abs = feat.abs()
-    # Tính trung bình trên Channels, Batch và Person -> ra shape [T, V]
-    weight_tv = feat_abs.mean(dim=(0, 1, 4)).squeeze() # shape [T, 20]
+    weight_tv = feat_abs.mean(dim=(0, 1, 4)).squeeze() 
     weight_tv = weight_tv.cpu().numpy()
     
     T = weight_tv.shape[0]
     
-    # Gom 20 khớp thành ma trận [T, 5] (5 bộ phận: head_torso, l_hand, r_hand, l_leg, r_leg)
+    # Gom 20 khớp thành ma trận [T, 5] 
     part_weights = np.zeros((T, 5))
     for t in range(T):
         for i, p_name in enumerate(PART_NAMES):
             idx = BODY_PARTS[p_name]
-            # Sửa đổi: Lấy giá trị lớn nhất (np.max) thay vì trung bình (np.mean)
-            # Giúp không làm loãng tín hiệu của các khớp chuyển động mạnh nhất trong nhóm (ví dụ: cổ tay ở label 8 - Throw)
             part_weights[t, i] = np.max(weight_tv[t, idx])
             
-    # Chuẩn hoá
-    w_min = np.min(part_weights)
-    w_max = np.max(part_weights) 
-    
-    if w_max > w_min:
-        part_weights = (part_weights - w_min) / (w_max - w_min)
-        part_weights = np.clip(part_weights, 0, 1) 
-    else:
-        part_weights = np.ones((T, 5))
-        
-    # Tăng cường độ mờ thấp nhất từ 0.3 lên 0.45 để ResNet50 vẫn thấy rõ bối cảnh các quỹ đạo gốc
-    MIN_INTENSITY = 0.45
-    part_weights = part_weights * (1.0 - MIN_INTENSITY) + MIN_INTENSITY
-    
+    # Áp dụng logarithm để giảm biên độ đỉnh
+    part_weights = np.log1p(part_weights)
     return part_weights
 
 def apply_soft_weighting(image, weights, T_orig):
@@ -111,28 +95,35 @@ def apply_soft_weighting(image, weights, T_orig):
     num_frames_stroi = 5
     w_5x5 = np.zeros((5, num_frames_stroi))
     
-    # STROI chọn 5 frame cách đều nhau từ T_orig gốc của video
     step = T_orig / num_frames_stroi
     stroi_indices = [int(i * step) for i in range(num_frames_stroi)]
     
     for i, orig_idx in enumerate(stroi_indices):
         if T_orig < 52:
-            # Nếu sequence ngắn < 52, GCN copy nguyên bản và pad zero vào đằng sau
             gcn_idx = orig_idx
         else:
-            # Nếu sequence dài > 52, GCN cắt phần giữa (center crop)
             begin = (T_orig - 52) // 2
             gcn_idx = orig_idx - begin
             
-        # Giới hạn gcn_idx trong khoảng [0, T-1] (0 đến 51)
         gcn_idx = max(0, min(T - 1, gcn_idx))
         
-        # Bắt lấy đỉnh chuyển động trong một cửa sổ nhỏ +/- 2 frames xung quanh frame hiện tại
         idx_start = max(0, gcn_idx - 2)
         idx_end = min(T, gcn_idx + 3)
-        
-        # Lấy MAX trong cửa sổ để không bỏ sót các gai chuyển động cực nhanh (vd: ném)
         w_5x5[:, i] = np.max(weights_img[:, idx_start:idx_end], axis=1)
+
+    # TIẾN HÀNH CHUẨN HOÁ TRỰC TIẾP TRÊN MA TRẬN 5x5 NÀY
+    # Đảm bảo rằng trong 25 ô trên ảnh, LUÔN CÓ 1 ô sáng nhất (1.0) và 1 ô tối nhất
+    w_min = np.min(w_5x5)
+    w_max = np.max(w_5x5)
+    
+    if w_max > w_min:
+        w_5x5 = (w_5x5 - w_min) / (w_max - w_min)
+    else:
+        w_5x5 = np.ones((5, num_frames_stroi))
+        
+    # Tăng cường độ mờ thấp nhất từ 0.3 lên 0.45 để ResNet50 vẫn thấy rõ bối cảnh các quỹ đạo gốc
+    MIN_INTENSITY = 0.45
+    w_5x5 = w_5x5 * (1.0 - MIN_INTENSITY) + MIN_INTENSITY
             
     # Phóng to ma trận trọng số 5x5 lên kích thước pixel ảnh bằng NEAREST để giữ nguyên các ô Grid
     w_image = Image.fromarray(np.uint8(w_5x5 * 255), mode='L')
