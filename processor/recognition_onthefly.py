@@ -11,6 +11,22 @@ import math
 from .recognition_rgb import REC_Processor
 
 class REC_Processor_OnTheFly(REC_Processor):
+    @staticmethod
+    def get_parser(add_help=False):
+        parent_parser = REC_Processor.get_parser(add_help=False)
+        parser = argparse.ArgumentParser(
+            add_help=add_help,
+            parents=[parent_parser],
+            description='On-the-Fly ResNet + CTR-GCN Processor')
+
+        parser.add_argument('--lr_scheduler', type=str, default='step',
+                            help='LR scheduler: step or cosine')
+        parser.add_argument('--warmup_epochs', type=int, default=0,
+                            help='Number of warmup epochs for cosine scheduler')
+        parser.add_argument('--label_smoothing', type=float, default=0.0,
+                            help='Label smoothing factor for CrossEntropyLoss')
+        return parser
+
     def load_model(self):
         # Load the combined ResNet + CTR-GCN Wrapper
         self.model = self.io.load_model(self.arg.model, **(self.arg.model_args['resnet_args']))
