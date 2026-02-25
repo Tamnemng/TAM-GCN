@@ -12,7 +12,6 @@ if __name__ == '__main__':
     processors = dict()
     processors['recognition'] = import_class('processor.recognition_rgb.REC_Processor')
     processors['recognition_rgb_only'] = import_class('processor.recognition_rgb.REC_Processor')
-    processors['recognition_rgb_fused'] = import_class('processor.recognition_rgb_fused.REC_Processor')
     
     subparsers = parser.add_subparsers(dest='processor')
     for k, p in processors.items():
