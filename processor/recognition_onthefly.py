@@ -30,6 +30,25 @@ class REC_Processor_OnTheFly(REC_Processor):
         self.model.ctrgcn.eval()
         
         self.loss = nn.CrossEntropyLoss()
+
+    def start(self):
+        self.io.print_log(f'Parameters:\n{str(vars(self.arg))}')
+        self.load_model()
+        self.load_weights()
+        self.gpu()
+        self.load_data()
+        self.load_optimizer()
+
+        if self.arg.phase == 'test':
+            self.test()
+            return
+
+        for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
+            self.epoch = epoch
+            self.train()
+            if epoch % self.arg.eval_interval == 0:
+                self.test()
+                self.save_model(name=f'epoch{epoch+1}_model')
         
     def train(self):
         self.model.train()
