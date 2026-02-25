@@ -53,7 +53,7 @@ class REC_Processor_OnTheFly(REC_Processor):
             self.optimizer.step()
 
             self.iter_info['loss'] = loss.data.item()
-            self.iter_info['lr'] = '{:.6f}'.format(self.lr)
+            self.iter_info['lr'] = '{:.6f}'.format(self.optimizer.param_groups[0]['lr'])
             loss_value.append(self.iter_info['loss'])
             self.show_iter_info()
             self.meta_info['iter'] += 1
@@ -61,6 +61,12 @@ class REC_Processor_OnTheFly(REC_Processor):
         self.epoch_info['mean_loss'] = np.mean(loss_value)
         self.show_epoch_info()
         self.io.print_timer()
+
+    def show_topk(self, k):
+        rank = self.result.argsort()
+        hit_top_k = [l in rank[i, -k:] for i, l in enumerate(self.label)]
+        accuracy = sum(hit_top_k) * 1.0 / len(hit_top_k)
+        self.io.print_log('\tTop{}: {:.2f}%'.format(k, 100 * accuracy))
 
     def test(self, evaluation=True):
         self.model.eval()
