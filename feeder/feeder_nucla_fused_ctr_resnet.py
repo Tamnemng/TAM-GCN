@@ -22,8 +22,18 @@ class Feeder(GCNFeeder):
         self.temporal_rgb_frames = temporal_rgb_frames
         self.random_flip = random_flip
         
-        # Identical transforms to the standalone ResNet implementation
-        self.resnet_transform = transforms.Compose([
+        # Training transforms with strong augmentation
+        self.resnet_transform_train = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+            transforms.RandomRotation(10),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.RandomErasing(p=0.2, scale=(0.02, 0.15)),
+        ])
+        
+        # Test transforms (no augmentation)
+        self.resnet_transform_test = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -31,7 +41,6 @@ class Feeder(GCNFeeder):
 
     def __getitem__(self, index):
         # 1. Get skeleton data using the parent class
-        # (This automatically applies view transforms/augmentations dynamically if train_val == 'train')
         data, _, label, idx = super().__getitem__(index)
         
         # 2. Load the corresponding unweighted base STROI image
@@ -49,7 +58,11 @@ class Feeder(GCNFeeder):
             
         if self.train_val == 'train' and self.random_flip and random.random() < 0.5:
             rgb = rgb.transpose(Image.FLIP_LEFT_RIGHT)
-            
-        rgb = self.resnet_transform(rgb)
+        
+        # Use training augmentation for train, clean transform for test
+        if self.train_val == 'train':
+            rgb = self.resnet_transform_train(rgb)
+        else:
+            rgb = self.resnet_transform_test(rgb)
         
         return data, rgb, label

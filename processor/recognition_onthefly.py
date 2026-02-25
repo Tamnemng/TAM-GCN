@@ -29,7 +29,9 @@ class REC_Processor_OnTheFly(REC_Processor):
             param.requires_grad = False
         self.model.ctrgcn.eval()
         
-        self.loss = nn.CrossEntropyLoss()
+        # Label smoothing for better generalization
+        label_smoothing = getattr(self.arg, 'label_smoothing', 0.0)
+        self.loss = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     def start(self):
         self.io.print_log(f'Parameters:\n{str(vars(self.arg))}')
@@ -43,13 +45,38 @@ class REC_Processor_OnTheFly(REC_Processor):
             self.test()
             return
 
+        best_acc = 0.0
         for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
             self.epoch = epoch
             self.train()
             if epoch % self.arg.eval_interval == 0:
-                self.test()
+                acc = self.test()
                 self.save_model(name=f'epoch{epoch+1}_model')
+                if acc is not None and acc > best_acc:
+                    best_acc = acc
+                    self.save_model(name='best_model')
+                    self.io.print_log(f'\t★ New best accuracy: {best_acc*100:.2f}%')
         
+    def adjust_learning_rate(self, epoch, step, base_lr):
+        """Cosine annealing with warmup, or fallback to step decay."""
+        lr_scheduler = getattr(self.arg, 'lr_scheduler', 'step')
+        warmup_epochs = getattr(self.arg, 'warmup_epochs', 0)
+        
+        if lr_scheduler == 'cosine':
+            if epoch < warmup_epochs:
+                # Linear warmup
+                lr = base_lr * (epoch + 1) / warmup_epochs
+            else:
+                # Cosine annealing after warmup
+                progress = (epoch - warmup_epochs) / max(1, self.arg.num_epoch - warmup_epochs)
+                lr = base_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+        else:
+            # Original step decay
+            lr = base_lr * (0.1 ** np.sum(epoch >= np.array(step)))
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+    
     def train(self):
         self.model.train()
         self.model.ctrgcn.eval() # Keep it in eval mode!
@@ -116,6 +143,12 @@ class REC_Processor_OnTheFly(REC_Processor):
             self.epoch_info['mean_loss'] = np.mean(loss_value)
             self.show_epoch_info()
 
-            # show top-k accuracy
+            # show top-k accuracy and return top-1
             for k in self.arg.show_topk:
                 self.show_topk(k)
+            
+            # Return top-1 accuracy for best model tracking
+            rank = self.result.argsort()
+            hit_top1 = [l in rank[i, -1:] for i, l in enumerate(self.label)]
+            return sum(hit_top1) * 1.0 / len(hit_top1)
+        return None
