@@ -23,7 +23,7 @@ class Model(nn.Module):
         feature_s = 255 * (feature_s-feature_s.min()) / (feature_s.max()-feature_s.min())
         N, C, T, V, M = x_.size()
 
-        weight = np.full((N, 1, 225, 45*self.temporal_rgb_frames),0)
+        weight = np.full((N, 1, 225, 45*self.temporal_rgb_frames),0.0)
         for n in range(N):
             if True:#feature_s[n, :, :, 0].mean(1).mean(0) > feature_s[n, :, :, 1].mean(1).mean(0):
                 for j, v in enumerate([3, 11, 7, 18, 14]):
@@ -32,7 +32,7 @@ class Model(nn.Module):
                     kth = min(self.temporal_positions, feature.shape[0] - 1)
                     temp = np.partition(-feature, kth)
                     feature = -temp[:kth].mean()
-                    weight[n, 0, 45*j:45*(j+1), :] = feature[np.newaxis, np.newaxis]
+                    weight[n, 0, :, 45*j:45*(j+1)] = feature
             else:
                 for j, v in enumerate([3, 11, 7, 18, 14]):
                     # use TOP 10 values along the temporal dimension
@@ -40,7 +40,7 @@ class Model(nn.Module):
                     kth = min(self.temporal_positions, feature.shape[0] - 1)
                     temp = np.partition(-feature, kth)
                     feature = -temp[:kth].mean()
-                    weight[n, 0, 45*j:45*(j+1), :] = feature[np.newaxis, np.newaxis]
+                    weight[n, 0, :, 45*j:45*(j+1)] = feature
 
         weight_cuda = torch.from_numpy(weight).float().cuda()
         weight_cuda = weight_cuda / 127

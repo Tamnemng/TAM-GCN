@@ -62,7 +62,7 @@ class Feeder(Dataset):
             self.data_dict = self.data_dict[0:100]
             
         self.rgb_transform = transforms.Compose([
-            transforms.Resize(size=(225, 45)), # Resize EACH FRAME to 225x45
+            transforms.Resize(size=(225, 45 * self.temporal_rgb_frames)), # Resize stitched image
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])

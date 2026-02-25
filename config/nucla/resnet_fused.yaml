@@ -1,8 +1,7 @@
 # python main.py recognition_rgb_fused -c config/nucla/resnet_fused.yaml
 work_dir: ./work_dir/nucla/resnet_fused
 
-skeleton_joints_pkl: result/nucla/joint_result_msg3d.pkl
-skeleton_bones_pkl: result/nucla/bone_result_msg3d.pkl
+skeleton_joints_pkl: result/nucla/CTROGC-GCN.pkl
 
 # feeder
 feeder: feeder.feeder_rgb_fused_nucla.Feeder
@@ -34,7 +33,8 @@ model_args:
 stgcn_args:
   in_channels: 3
   num_class: 10
-  edge_importance_weighting: True
+  num_person: 1
+  num_point: 20
   graph: graph.ucla.Graph
   graph_args:
     labeling_mode: "spatial"
@@ -42,8 +42,8 @@ stgcn_args:
 # training
 temporal_positions: 15
 fix_weights: False
-teacher_model: models.stgcn.Model
-joint_weights: ./result/nucla/ST_GCN.pt
+teacher_model: models.ctrgcn.Model
+joint_weights: ./result/nucla/CTROGC-GCN.pt
 device: [0]
 base_lr: 0.1
 step: [10, 50]

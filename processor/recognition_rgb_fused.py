@@ -97,62 +97,50 @@ class REC_Processor(Processor):
         accuracy = sum(hit_top_k) * 1.0 / len(hit_top_k)
         self.io.print_log('\tTop{}: {:.2f}%'.format(k, 100 * accuracy))
         acc_r1r3 = acc_stgcn = acc = acc5 = 0
-        #'''
-        # *********************ensemble with skl results***********************start
+        
+        ensemble_success = False
         if phase == 'eval':
-            r1_yan = open(self.arg.skeleton_joints_pkl, 'rb')
-            r1_yan = list(pickle.load(r1_yan).items())
-            r2_yan = open(self.arg.skeleton_bones_pkl, 'rb')
-            r2_yan = list(pickle.load(r2_yan).items())
+            try:
+                # Proceed with ensemble if the joints pkl exists
+                if os.path.exists(self.arg.skeleton_joints_pkl) and hasattr(self.data_loader['test'].dataset, 'sample_name'):
+                    r1_yan = open(self.arg.skeleton_joints_pkl, 'rb')
+                    r1_yan = list(pickle.load(r1_yan).items())
 
-            result_dict = dict(
-                zip(self.data_loader['test'].dataset.sample_name,
-                    self.result))
-            self.io.save_pkl(result_dict, 'tmp_test_result.pkl')
-            r3 = open(os.path.join(self.arg.work_dir,'tmp_test_result.pkl'), 'rb')
-            r3 = list(pickle.load(r3).items())
-            #r2 = self.result.items()
-            right_num = total_num = right_num_5 = right_num_r1r3 = right_num_stgcn = 0
-            for i,l in enumerate(self.label):
-                #_, l = label[i]
-                #_, r11 = r1[i]
-                #_, r22 = r2[i]
-                _, r33 = r3[i]
-                _, r11_yan = r1_yan[i]
-                _, r22_yan = r2_yan[i]
-                #r = r11 + r22 + r33
+                    result_dict = dict(zip(self.data_loader['test'].dataset.sample_name, self.result))
+                    self.io.save_pkl(result_dict, 'tmp_test_result.pkl')
+                    r3 = open(os.path.join(self.arg.work_dir,'tmp_test_result.pkl'), 'rb')
+                    r3 = list(pickle.load(r3).items())
+                    
+                    right_num_r1r3 = total_num = 0
+                    for i,l in enumerate(self.label):
+                        _, r33 = r3[i]
+                        _, r11_yan = r1_yan[i]
+                            
+                        r1r3 = r11_yan + r33
+                        r1r3 = np.argmax(r1r3)
 
-                r1r3 = r11_yan + r33
-                r_stgcn = r11_yan + r22_yan + r33
-                rank_5 = r1r3.argsort()[-5:]
-                right_num_5 += int(int(l) in rank_5)
-                #r = np.argmax(r)
-                r1r3 = np.argmax(r1r3)
-                r_stgcn = np.argmax(r_stgcn)
-
-                #right_num += int(r == int(l))
-                right_num_r1r3 += int(r1r3 == int(l))
-                right_num_stgcn += int(r_stgcn == int(l))
-                total_num += 1
-            #acc = right_num / total_num
-            acc_r1r3 = right_num_r1r3 / total_num
-            acc_stgcn = right_num_stgcn / total_num
-            acc5 = right_num_5 / total_num
-            #accuracy = acc
-            self.io.print_log('ST-ROI Top 1:                        {}'.format(accuracy))
-            self.io.print_log('Top 1 with Joint:                    {}'.format(acc_r1r3))
-            self.io.print_log('Top 1 with Joint + Bone (ST-GCN):    {}'.format(acc_stgcn))
-        # *********************ensemble with skl results***********************end
+                        right_num_r1r3 += int(r1r3 == int(l))
+                        total_num += 1
+                        
+                    acc_r1r3 = right_num_r1r3 / total_num
+                    ensemble_success = True
+                    self.io.print_log('ST-ROI Top 1:                        {}'.format(accuracy))
+                    self.io.print_log('Top 1 with Joint:                    {}'.format(acc_r1r3))
+            except Exception as e:
+                pass
 
         if k==1:
             self.progress_info[int(self.meta_info['epoch']/self.arg.eval_interval), 2]  =  100 * accuracy
-            #if (accuracy > self.meta_info['best_t1'] or acc_stgcn > self.meta_info['best_t1']) and phase=='eval':
-            if acc_stgcn > self.meta_info['best_t1'] and phase=='eval':
-                self.meta_info['best_t1'] = acc_stgcn
+            metric = acc_r1r3 if ensemble_success else accuracy
+            if metric > self.meta_info['best_t1'] and phase=='eval':
+                self.meta_info['best_t1'] = metric
                 self.meta_info['is_best'] = True
-                self.io.print_log('Best Ensemble Top 1: {}; Top 1 with STGCN: {}'.format(acc_r1r3, acc_stgcn))
+                if ensemble_success:
+                    self.io.print_log('Best Ensemble Top 1 with Joint: {}'.format(acc_r1r3))
+                else:
+                    self.io.print_log('Best Top 1: {:.2f}%'.format(100 * accuracy))
         else:
-            self.progress_info[int(self.meta_info['epoch']/self.arg.eval_interval), 3]  =  100 * acc_r1r3
+            self.progress_info[int(self.meta_info['epoch']/self.arg.eval_interval), 3]  =  100 * accuracy
 
     def train(self):
         self.model.train()
