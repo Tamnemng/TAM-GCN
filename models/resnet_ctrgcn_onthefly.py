@@ -1,88 +1,139 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
 
 
-# Import only the ResNet structure
-from models.resnet_only import Model as ResNet
-
-
-class SkeletonAttention(nn.Module):
-    """Lightweight learnable attention module.
-    Takes raw skeleton feature scores per body part and learns 
-    optimal attention weights via a 2-layer MLP + Sigmoid.
+class CrossModalAttention(nn.Module):
+    """Cross-Modal Attention: injects skeleton features into ResNet feature maps.
+    
+    Unlike MMnet which multiplies attention at pixel level (before any feature learning),
+    this module fuses skeleton and RGB at the FEATURE level — after ResNet has already
+    extracted meaningful visual features.
+    
+    Performs both:
+    - Channel attention: skeleton features select WHICH feature channels are important
+    - Spatial attention: skeleton spatiotemporal grid highlights WHERE to look
+    
+    Uses residual connection to preserve original RGB features.
     """
-    def __init__(self, num_parts=5, hidden_dim=16):
+    def __init__(self, rgb_channels, skel_grid_size=25, reduction=4):
+        """
+        Args:
+            rgb_channels: number of channels in the ResNet feature map (e.g. 512 for layer2)
+            skel_grid_size: flattened size of skeleton grid (5 parts × 5 times = 25)
+            reduction: channel reduction ratio for the channel attention MLP
+        """
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(num_parts, hidden_dim),
+        
+        # Channel attention: skeleton → which channels matter
+        self.channel_attn = nn.Sequential(
+            nn.Linear(skel_grid_size, rgb_channels // reduction),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, num_parts),
+            nn.Linear(rgb_channels // reduction, rgb_channels),
             nn.Sigmoid()
         )
-    
-    def forward(self, x):
-        # x: (B, num_parts) raw feature scores
-        # output: (B, num_parts) attention weights in [0, 1]
-        return self.mlp(x)
+        
+        # Spatial attention: skeleton grid → where to look in feature map
+        self.spatial_proj = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=3, padding=1),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, rgb_feat, skel_grid):
+        """
+        Args:
+            rgb_feat: (B, C, H, W) ResNet feature map
+            skel_grid: (B, 1, 5, 5) spatiotemporal skeleton feature grid
+        Returns:
+            fused_feat: (B, C, H, W) feature map with skeleton info injected
+        """
+        B, C, H, W = rgb_feat.shape
+        
+        # 1. Channel attention from skeleton
+        skel_flat = skel_grid.view(B, -1)                      # (B, 25)
+        ch_attn = self.channel_attn(skel_flat)                  # (B, C)
+        ch_attn = ch_attn.unsqueeze(-1).unsqueeze(-1)           # (B, C, 1, 1)
+        
+        # 2. Spatial attention from skeleton grid
+        sp_attn = F.interpolate(skel_grid, size=(H, W), mode='bilinear', align_corners=False)  # (B, 1, H, W)
+        sp_attn = self.spatial_proj(sp_attn)                    # (B, 1, H, W)
+        
+        # 3. Combined cross-modal modulation + residual
+        modulated = rgb_feat * ch_attn * sp_attn                # (B, C, H, W)
+        return rgb_feat + modulated                             # residual: keep original + add skeleton-guided features
 
 
 class Model(nn.Module):
-    def __init__(self, num_class, pretrained=True):
+    def __init__(self, num_class, pretrained=True, temporal_rgb_frames=5):
         super(Model, self).__init__()
         
         # The processor will inject the frozen CTR-GCN instance here.
         self.ctrgcn = ''
+        self.temporal_rgb_frames = temporal_rgb_frames
         
-        self.resnet = ResNet(num_class=num_class, pretrained=pretrained)
-        self.temporal_rgb_frames = 5
+        # ResNet-50 backbone — we'll run it stage by stage
+        resnet = models.resnet50(pretrained=pretrained)
         
-        # Learnable attention: converts 5 raw body-part scores → 5 attention weights
-        self.attention = SkeletonAttention(num_parts=5, hidden_dim=16)
+        # Split ResNet into stages for mid-level injection
+        self.stem = nn.Sequential(
+            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
+        )                                                       # → (B, 64, 56, 56)
+        self.layer1 = resnet.layer1                              # → (B, 256, 56, 56)
+        self.layer2 = resnet.layer2                              # → (B, 512, 28, 28)
+        # ↑ Cross-modal injection point ↑
+        self.layer3 = resnet.layer3                              # → (B, 1024, 14, 14)
+        self.layer4 = resnet.layer4                              # → (B, 2048, 7, 7)
+        self.avgpool = resnet.avgpool                            # → (B, 2048, 1, 1)
+        self.fc = nn.Linear(resnet.fc.in_features, num_class)    # → (B, num_class)
         
-    def _extract_part_scores(self, intensity_norm):
-        """Extract raw feature score per body part from normalized intensity.
+        # Cross-modal attention at layer2 output (512 channels)
+        self.cross_attn = CrossModalAttention(
+            rgb_channels=512,
+            skel_grid_size=5 * temporal_rgb_frames,  # 5 parts × 5 frames = 25
+            reduction=4
+        )
         
-        Uses the same joint mapping and top-k logic as the offline script,
-        but returns raw scores instead of dividing by 127.
+        # Body part to joint index mapping (matches STROI row order)
+        self.part_joints = [3, 7, 11, 14, 18]
         
-        Args:
-            intensity_norm: (B, T_new, V, M) normalized intensity [0, 255]
-        Returns:
-            raw_scores: (B, 5) one score per STROI row order:
-                        [hands_row0, hands_row1, legs_row2, legs_row3, head_row4]
+    def _build_skel_grid(self, intensity_norm):
+        """Build (B, 1, 5, T_frames) spatiotemporal skeleton feature grid.
+        
+        Rows = 5 body parts, Cols = T_frames temporal bins.
+        Each cell = avg skeleton feature intensity for that (part, time).
         """
-        # STROI layout matches offline gen_ucla_stroi_weighted.py:
-        # parts_v = [3, 11, 7, 18, 14] → [head, right_hand, left_hand, right_leg, left_leg]
-        # STROI rows: [Row0: right_arm, Row1: left_arm, Row2: right_leg, Row3: left_leg, Row4: head]
-        joint_per_row = [11, 7, 18, 14, 3]  # map each STROI row to its representative joint
+        B, T_new, V, M = intensity_norm.shape
+        T_frames = self.temporal_rgb_frames
         
-        B = intensity_norm.shape[0]
-        scores = []
-        for v in joint_per_row:
-            part_feat = intensity_norm[:, :, v, 0]  # (B, T_new)
-            k = min(15, part_feat.shape[1])
-            topk_vals = torch.topk(part_feat, k, dim=1)[0]  # (B, k)
-            scores.append(topk_vals.mean(dim=1))  # (B,)
+        # Extract per-joint intensities → pool into grid
+        part_features = []
+        for v in self.part_joints:
+            part_features.append(intensity_norm[:, :, v, 0])  # (B, T_new)
+        part_features = torch.stack(part_features, dim=1)     # (B, 5, T_new)
         
-        raw_scores = torch.stack(scores, dim=1)  # (B, 5)
-        # Normalize to ~[0, 2] range (divide by 127) as baseline input to attention
-        raw_scores = raw_scores / 127.0
-        return raw_scores
+        # Adaptive pool T_new → T_frames temporal bins
+        part_features = F.adaptive_avg_pool1d(part_features, T_frames)  # (B, 5, T_frames)
+        
+        # Normalize
+        part_features = part_features / 127.0
+        
+        return part_features.unsqueeze(1)  # (B, 1, 5, T_frames)
         
     def forward(self, x_s, x_rgb):
-        # x_s: Skeleton data -> (B, C, T, V, M) = (B, 3, 52, 20, 1) usually
-        # x_rgb: Base STROI image -> (B, 3, 224, 224)
+        # x_s: (B, C, T, V, M) = (B, 3, 52, 20, 1)
+        # x_rgb: (B, 3, 224, 224) base STROI image
         
-        # 1. Extract feature activations from frozen CTR-GCN
+        # ===== 1. Skeleton branch: extract spatiotemporal features =====
         with torch.no_grad():
             _, feature_s = self.ctrgcn.extract_feature(x_s)
-            # feature_s: (B, C_new, T_new, V, M) e.g. (B, 256, 13, 20, 1)
             
             # L2 norm across channel dim
-            intensity = (feature_s * feature_s).sum(dim=1) ** 0.5  # (B, T_new, V, M)
+            intensity = (feature_s * feature_s).sum(dim=1) ** 0.5
             intensity = torch.abs(intensity)
             
-            # Global min-max normalize to [0, 255] per sample
+            # Per-sample min-max normalize to [0, 255]
             B = intensity.shape[0]
             flat = intensity.view(B, -1)
             f_min = flat.min(dim=1, keepdim=True)[0]
@@ -90,23 +141,23 @@ class Model(nn.Module):
             diff = f_max - f_min
             diff[diff == 0] = 1e-6
             flat_norm = 255.0 * (flat - f_min) / diff
-            intensity_norm = flat_norm.view_as(intensity)  # (B, T_new, V, M)
+            intensity_norm = flat_norm.view_as(intensity)
         
-        # 2. Compute learnable attention from skeleton features
-        raw_scores = self._extract_part_scores(intensity_norm.detach())  # (B, 5)
-        attn_weights = self.attention(raw_scores)  # (B, 5) in [0, 1] via Sigmoid
+        # Build skeleton spatiotemporal grid
+        skel_grid = self._build_skel_grid(intensity_norm.detach())  # (B, 1, 5, 5)
         
-        # Scale to [0.5, 1.5] range so attention modulates rather than suppresses
-        attn_weights = 0.5 + attn_weights  # (B, 5) in [0.5, 1.5]
+        # ===== 2. RGB branch: ResNet stages with cross-modal injection =====
+        x = self.stem(x_rgb)       # (B, 64, 56, 56)
+        x = self.layer1(x)         # (B, 256, 56, 56)
+        x = self.layer2(x)         # (B, 512, 28, 28)
         
-        # 3. Create weight map: (B, 1, 5, 1) → interpolate to (B, 1, 224, 224)
-        weight_map = attn_weights.unsqueeze(1).unsqueeze(3)  # (B, 1, 5, 1)
-        weight_map_resized = torch.nn.functional.interpolate(
-            weight_map, size=(224, 224), mode='nearest'
-        )
+        # ★ Cross-modal injection: skeleton features meet RGB features 
+        x = self.cross_attn(x, skel_grid)  # (B, 512, 28, 28) — fused
         
-        # 4. Apply attention-weighted STROI and run through ResNet
-        x_rgb_weighted = x_rgb * weight_map_resized
-        output = self.resnet(x_rgb_weighted)
+        x = self.layer3(x)         # (B, 1024, 14, 14)
+        x = self.layer4(x)         # (B, 2048, 7, 7)
+        x = self.avgpool(x)        # (B, 2048, 1, 1)
+        x = torch.flatten(x, 1)    # (B, 2048)
+        output = self.fc(x)        # (B, num_class)
         
         return output
