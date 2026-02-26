@@ -21,7 +21,7 @@ test_feeder_args:
   temporal_rgb_frames: 5
 
 # model
-model: models.resnet_ctrgcn_onthefly.Model
+model: models.resnet_ctrgcn_weight.Model
 model_args:
   resnet_args:
     num_class: 10
