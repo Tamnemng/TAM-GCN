@@ -109,8 +109,8 @@ def denormalize_image(tensor):
 
 def extract_attention_maps(model, skeleton, rgb, device):
     """Run forward pass and extract intermediate attention maps + Grad-CAM."""
-    skeleton = skeleton.unsqueeze(0).float().to(device)
-    rgb = rgb.unsqueeze(0).float().to(device)
+    skeleton = torch.as_tensor(skeleton).unsqueeze(0).float().to(device)
+    rgb = torch.as_tensor(rgb).unsqueeze(0).float().to(device)
     rgb.requires_grad = False
 
     # ===== Step 1: Get skeleton grid (same as model._build_skel_grid) =====
@@ -138,8 +138,18 @@ def extract_attention_maps(model, skeleton, rgb, device):
     with torch.no_grad():
         skel_flat = skel_grid.view(1, -1)
         ch_attn = model.cross_attn.channel_attn(skel_flat)  # (1, 512)
-        sp_attn = F.interpolate(skel_grid, size=(28, 28), mode='bilinear', align_corners=False)
-        sp_attn = model.cross_attn.spatial_proj(sp_attn)  # (1, 1, 28, 28)
+        
+        # Tính toán feat_ca giống hệt forward pass
+        ch_attn_expanded = ch_attn.unsqueeze(-1).unsqueeze(-1)
+        feat_ca = x * ch_attn_expanded
+        
+        # Spatial theo cơ chế mới (Concat RGB Max, RGB Avg, Skel)
+        skel_sp = F.interpolate(skel_grid, size=(28, 28), mode='bilinear', align_corners=False)
+        rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]
+        rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)
+        sp_input = torch.cat([rgb_max, rgb_avg, skel_sp], dim=1)
+        
+        sp_attn = model.cross_attn.spatial_conv(sp_input)  # (1, 1, 28, 28)
 
     # ===== Step 3: Grad-CAM on layer4 =====
     # Forward with gradient tracking
@@ -243,26 +253,28 @@ def plot_sample(rgb_tensor, label, attn_data, save_path, sample_name=''):
 
 
 def log_spatial_proj_weights(model):
-    """Log the spatial_proj Conv2d and BN weights once."""
-    conv = model.cross_attn.spatial_proj[0]  # Conv2d(1, 1, 3, 3)
-    bn = model.cross_attn.spatial_proj[1]    # BatchNorm2d(1)
+    """Log the spatial_conv Conv2d and BN weights once."""
+    conv = model.cross_attn.spatial_conv[0]  # Conv2d(3, 1, 7, 7)
+    bn = model.cross_attn.spatial_conv[1]    # BatchNorm2d(1)
     
     print('\n' + '=' * 60)
-    print('  SPATIAL_PROJ WEIGHTS (Conv2d + BatchNorm2d + Sigmoid)')
+    print('  SPATIAL_CONV WEIGHTS (Conv2d 3-channel + BatchNorm2d + Sigmoid)')
     print('=' * 60)
-    w = conv.weight.detach().cpu().numpy().squeeze()  # (3, 3)
-    b = conv.bias.detach().cpu().numpy().squeeze()    # scalar
-    print(f'  Conv2d kernel (3x3):')
-    for row in w:
-        print(f'    [{"  ".join(f"{v:+.4f}" for v in row)}]')
-    print(f'  Conv2d bias: {b:.4f}')
+    w = conv.weight.detach().cpu().numpy().squeeze()  # (3, 7, 7)
+    # Lớp bias của Conv2d hiện tại bị tắt (bias=False)
+    # b = conv.bias.detach().cpu().numpy().squeeze()
+    
+    channels = ["RGB MaxPool", "RGB AvgPool", "Skeleton Grid"]
+    for i, c_name in enumerate(channels):
+        print(f'  Conv2d kernel (7x7) cho kênh: {c_name}')
+        # Log giá trị trung bình/min/max của từng kernel thay vì in cả ma trận 7x7 để đỡ rối mắt
+        print(f'    Mean={w[i].mean():.4f}, Min={w[i].min():.4f}, Max={w[i].max():.4f}')
+        
     print(f'  BN weight (gamma): {bn.weight.detach().cpu().item():.4f}')
     print(f'  BN bias (beta):    {bn.bias.detach().cpu().item():.4f}')
     print(f'  BN running_mean:   {bn.running_mean.detach().cpu().item():.4f}')
     print(f'  BN running_var:    {bn.running_var.detach().cpu().item():.4f}')
-    # Effective: output = Sigmoid(gamma * (conv_out - running_mean) / sqrt(running_var + eps) + beta)
-    print(f'  => If conv_out > running_mean => BN output positive/negative depends on gamma sign')
-    print(f'  => Then Sigmoid maps to [0, 1]')
+    print(f'  => Spatial map là sự kết hợp của nội dung ảnh (RGB) và gợi ý (Skeleton)')
     print('=' * 60)
 
 

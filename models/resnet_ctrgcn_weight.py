@@ -61,11 +61,11 @@ class Model(nn.Module):
         # parts_v = [3, 11, 7, 18, 14] → [head, right_hand, left_hand, right_leg, left_leg]
         # STROI rows: [Row0: right_arm, Row1: left_arm, Row2: right_leg, Row3: left_leg, Row4: head]
         joint_per_row = [
-            11,
-            7,
-            18,
-            14,
-            3,
+            3,  # Head
+            7,  # L_Hand
+            11, # R_Hand
+            14, # L_Leg
+            18, # R_Leg
         ]  # map each STROI row to its representative joint
 
         B = intensity_norm.shape[0]

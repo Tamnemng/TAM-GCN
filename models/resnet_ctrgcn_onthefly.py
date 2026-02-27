@@ -7,62 +7,58 @@ import torchvision.models as models
 class CrossModalAttention(nn.Module):
     """Cross-Modal Attention: injects skeleton features into ResNet feature maps.
     
-    Unlike MMnet which multiplies attention at pixel level (before any feature learning),
-    this module fuses skeleton and RGB at the FEATURE level — after ResNet has already
-    extracted meaningful visual features.
-    
-    Performs both:
-    - Channel attention: skeleton features select WHICH feature channels are important
-    - Spatial attention: skeleton spatiotemporal grid highlights WHERE to look
-    
-    Uses residual connection to preserve original RGB features.
+    Improved version based on CBAM:
+    - Channel attention: uses Skeleton to guide channel selection.
+    - Spatial attention: cross-modal interaction between RGB max/avg pooling and Skeleton.
     """
     def __init__(self, rgb_channels, skel_grid_size=25, reduction=4):
-        """
-        Args:
-            rgb_channels: number of channels in the ResNet feature map (e.g. 512 for layer2)
-            skel_grid_size: flattened size of skeleton grid (5 parts × 5 times = 25)
-            reduction: channel reduction ratio for the channel attention MLP
-        """
         super().__init__()
         
-        # Channel attention: skeleton → which channels matter
+        # 1. CHANNEL ATTENTION: Vẫn dùng Skeleton để hướng dẫn chọn Channel
         self.channel_attn = nn.Sequential(
-            nn.Linear(skel_grid_size, rgb_channels // reduction),
+            nn.Linear(skel_grid_size, rgb_channels // reduction, bias=False),
             nn.ReLU(inplace=True),
-            nn.Linear(rgb_channels // reduction, rgb_channels),
+            nn.Linear(rgb_channels // reduction, rgb_channels, bias=False),
             nn.Sigmoid()
         )
         
-        # Spatial attention: skeleton grid → where to look in feature map
-        self.spatial_proj = nn.Sequential(
-            nn.Conv2d(1, 1, kernel_size=3, padding=1),
+        # 2. SPATIAL ATTENTION: Giao thoa giữa RGB và Skeleton
+        # Nhận vào 3 channels: 1 từ MaxPool(RGB), 1 từ AvgPool(RGB), 1 từ Skeleton Grid
+        self.spatial_conv = nn.Sequential(
+            nn.Conv2d(3, 1, kernel_size=7, padding=3, bias=False), # Receptive field rộng hơn (7x7)
             nn.BatchNorm2d(1),
             nn.Sigmoid()
         )
         
     def forward(self, rgb_feat, skel_grid):
-        """
-        Args:
-            rgb_feat: (B, C, H, W) ResNet feature map
-            skel_grid: (B, 1, 5, 5) spatiotemporal skeleton feature grid
-        Returns:
-            fused_feat: (B, C, H, W) feature map with skeleton info injected
-        """
         B, C, H, W = rgb_feat.shape
         
-        # 1. Channel attention from skeleton
+        # --- BƯỚC 1: CHANNEL ATTENTION ---
         skel_flat = skel_grid.view(B, -1)                      # (B, 25)
-        ch_attn = self.channel_attn(skel_flat)                  # (B, C)
-        ch_attn = ch_attn.unsqueeze(-1).unsqueeze(-1)           # (B, C, 1, 1)
+        ch_attn = self.channel_attn(skel_flat)                 # (B, C)
+        ch_attn = ch_attn.unsqueeze(-1).unsqueeze(-1)          # (B, C, 1, 1)
         
-        # 2. Spatial attention from skeleton grid
-        sp_attn = F.interpolate(skel_grid, size=(H, W), mode='bilinear', align_corners=False)  # (B, 1, H, W)
-        sp_attn = self.spatial_proj(sp_attn)                    # (B, 1, H, W)
+        # Nhân Channel Attention vào RGB trước (giống CBAM)
+        feat_ca = rgb_feat * ch_attn                           # (B, C, H, W)
         
-        # 3. Combined cross-modal modulation + residual
-        modulated = rgb_feat * ch_attn * sp_attn                # (B, C, H, W)
-        return rgb_feat + modulated                             # residual: keep original + add skeleton-guided features
+        # --- BƯỚC 2: SPATIAL ATTENTION (CROSS-MODAL) ---
+        # Upsample skeleton grid lên kích thước của RGB feature map
+        skel_sp = F.interpolate(skel_grid, size=(H, W), mode='bilinear', align_corners=False) # (B, 1, H, W)
+        
+        # Lấy thông tin không gian nội tại của RGB (chỗ nào đang nổi bật)
+        rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]   # (B, 1, H, W)
+        rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)     # (B, 1, H, W)
+        
+        # Nối (Concat) cả 3 lại với nhau: RGB Max, RGB Avg, và Skeleton
+        sp_input = torch.cat([rgb_max, rgb_avg, skel_sp], dim=1) # (B, 3, H, W)
+        
+        # Tính toán Spatial Attention map
+        sp_attn = self.spatial_conv(sp_input)                  # (B, 1, H, W)
+        
+        # --- BƯỚC 3: APPLY MODULATION VÀ RESIDUAL ---
+        modulated = feat_ca * sp_attn                          # (B, C, H, W)
+        
+        return rgb_feat + modulated
 
 
 class Model(nn.Module):
