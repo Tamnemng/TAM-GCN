@@ -181,9 +181,14 @@ def extract_attention_maps(model, skeleton, rgb, device):
     if cam.max() > 0:
         cam = cam / cam.max()
 
+    # Also capture the interpolated grid BEFORE spatial_proj (for comparison)
+    with torch.no_grad():
+        sp_before_proj = F.interpolate(skel_grid, size=(28, 28), mode='bilinear', align_corners=False)
+
     return {
         'skel_grid': skel_grid.squeeze().cpu().numpy(),          # (5, 5)
         'spatial_attn': sp_attn.squeeze().cpu().numpy(),         # (28, 28)
+        'sp_before_proj': sp_before_proj.squeeze().cpu().numpy(),# (28, 28)
         'channel_attn': ch_attn.squeeze().cpu().numpy(),         # (512,)
         'gradcam': cam,                                          # (224, 224)
         'pred_class': pred_class,
@@ -237,6 +242,84 @@ def plot_sample(rgb_tensor, label, attn_data, save_path, sample_name=''):
     print(f"  Saved: {save_path}")
 
 
+def log_spatial_proj_weights(model):
+    """Log the spatial_proj Conv2d and BN weights once."""
+    conv = model.cross_attn.spatial_proj[0]  # Conv2d(1, 1, 3, 3)
+    bn = model.cross_attn.spatial_proj[1]    # BatchNorm2d(1)
+    
+    print('\n' + '=' * 60)
+    print('  SPATIAL_PROJ WEIGHTS (Conv2d + BatchNorm2d + Sigmoid)')
+    print('=' * 60)
+    w = conv.weight.detach().cpu().numpy().squeeze()  # (3, 3)
+    b = conv.bias.detach().cpu().numpy().squeeze()    # scalar
+    print(f'  Conv2d kernel (3x3):')
+    for row in w:
+        print(f'    [{"  ".join(f"{v:+.4f}" for v in row)}]')
+    print(f'  Conv2d bias: {b:.4f}')
+    print(f'  BN weight (gamma): {bn.weight.detach().cpu().item():.4f}')
+    print(f'  BN bias (beta):    {bn.bias.detach().cpu().item():.4f}')
+    print(f'  BN running_mean:   {bn.running_mean.detach().cpu().item():.4f}')
+    print(f'  BN running_var:    {bn.running_var.detach().cpu().item():.4f}')
+    # Effective: output = Sigmoid(gamma * (conv_out - running_mean) / sqrt(running_var + eps) + beta)
+    print(f'  => If conv_out > running_mean => BN output positive/negative depends on gamma sign')
+    print(f'  => Then Sigmoid maps to [0, 1]')
+    print('=' * 60)
+
+
+def log_attention_details(sample_name, label, attn_data):
+    """Print detailed numerical info for one sample."""
+    grid = attn_data['skel_grid']          # (5, 5)
+    sp = attn_data['spatial_attn']         # (28, 28)
+    sp_raw = attn_data['sp_before_proj']   # (28, 28)
+    ch = attn_data['channel_attn']         # (512,)
+    logits = attn_data['output_logits']    # (10,)
+    pred = attn_data['pred_class']
+    
+    print(f'\n{"~" * 60}')
+    print(f'  SAMPLE: {sample_name}  |  GT: {LABEL_NAMES[label]}  |  Pred: {LABEL_NAMES[pred]}')
+    print(f'{"~" * 60}')
+    
+    # 1. Skeleton grid
+    print(f'\n  [1] SKELETON GRID (5x5) - raw values from CTR-GCN:')
+    for i, name in enumerate(PART_NAMES):
+        vals = '  '.join(f'{v:.3f}' for v in grid[i])
+        print(f'    {name:8s}: [{vals}]')
+    
+    # 2. Spatial attention BEFORE vs AFTER spatial_proj
+    # Split into 5 horizontal bands (matching STROI rows)
+    band_h = 28 // 5  # ~5 pixels per band
+    print(f'\n  [2] SPATIAL ATTENTION (per body-part band):')
+    print(f'    {"Part":8s}  {"Before proj":>12s}  {"After proj":>12s}  {"Direction":>10s}')
+    print(f'    {"-"*8}  {"-"*12}  {"-"*12}  {"-"*10}')
+    for i, name in enumerate(PART_NAMES):
+        r_start = i * band_h
+        r_end = min((i + 1) * band_h, 28)
+        raw_mean = sp_raw[r_start:r_end, :].mean()
+        proj_mean = sp[r_start:r_end, :].mean()
+        direction = 'SAME' if (raw_mean > sp_raw.mean()) == (proj_mean > sp.mean()) else 'FLIPPED'
+        print(f'    {name:8s}  {raw_mean:12.4f}  {proj_mean:12.4f}  {direction:>10s}')
+    print(f'    {"":-<8}  {"":-<12}  {"":-<12}')
+    print(f'    {"Overall":8s}  {sp_raw.mean():12.4f}  {sp.mean():12.4f}')
+    print(f'    {"":8s}  min={sp_raw.min():.4f}   min={sp.min():.4f}')
+    print(f'    {"":8s}  max={sp_raw.max():.4f}   max={sp.max():.4f}')
+    
+    # 3. Channel attention stats
+    print(f'\n  [3] CHANNEL ATTENTION (512 channels):')
+    print(f'    mean={ch.mean():.4f}  std={ch.std():.4f}  min={ch.min():.4f}  max={ch.max():.4f}')
+    top5_idx = ch.argsort()[-5:][::-1]
+    bot5_idx = ch.argsort()[:5]
+    print(f'    Top 5 channels: {["%d(%.3f)" % (i, ch[i]) for i in top5_idx]}')
+    print(f'    Bot 5 channels: {["%d(%.3f)" % (i, ch[i]) for i in bot5_idx]}')
+    
+    # 4. Logits
+    print(f'\n  [4] OUTPUT LOGITS:')
+    sorted_idx = logits.argsort()[::-1]
+    for rank, i in enumerate(sorted_idx[:5]):
+        marker = ' <<< GT' if i == label else ''
+        marker += ' <<< PRED' if i == pred else ''
+        print(f'    #{rank+1}: {LABEL_NAMES[i]:25s} = {logits[i]:+.3f}{marker}')
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -247,6 +330,9 @@ def main():
 
     # Load model
     model = load_model(args.weights, args.ctrgcn_weights, DEVICE)
+    
+    # Log spatial_proj weights ONCE
+    log_spatial_proj_weights(model)
 
     # Load val data
     dataset = Feeder(
@@ -294,12 +380,15 @@ def main():
 
         # Extract attention maps
         attn_data = extract_attention_maps(model, skeleton, rgb, DEVICE)
+        
+        # Log detailed numbers
+        log_attention_details(sample_name, label, attn_data)
 
         # Plot
         save_path = os.path.join(args.output_dir, f'{sample_name}_attn.png')
         plot_sample(rgb, label, attn_data, save_path, sample_name)
 
-    print(f"\n✓ Done! Saved {len(indices)} visualizations to {args.output_dir}")
+    print(f"\n[DONE] Saved {len(indices)} visualizations to {args.output_dir}")
 
 
 if __name__ == '__main__':
