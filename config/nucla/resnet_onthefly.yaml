@@ -1,4 +1,4 @@
-work_dir: ./work_dir/nucla/resnet_onthefly_v2
+work_dir: ./work_dir/nucla/resnet_onthefly
 
 # feeder
 feeder: feeder.feeder_nucla_fused_ctr_resnet.Feeder
