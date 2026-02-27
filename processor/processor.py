@@ -49,6 +49,14 @@ class Processor(IO):
 
     def load_data(self):
         Feeder = import_class(self.arg.feeder)
+        
+        # Override data_path if provided via CLI
+        if hasattr(self.arg, 'data_path') and self.arg.data_path is not None:
+            if hasattr(self.arg, 'train_feeder_args') and isinstance(self.arg.train_feeder_args, dict):
+                self.arg.train_feeder_args['data_path'] = self.arg.data_path
+            if hasattr(self.arg, 'test_feeder_args') and isinstance(self.arg.test_feeder_args, dict):
+                self.arg.test_feeder_args['data_path'] = self.arg.data_path
+                
         if 'debug' not in self.arg.train_feeder_args:
             self.arg.train_feeder_args['debug'] = self.arg.debug
         self.data_loader = dict()
@@ -176,6 +184,9 @@ class Processor(IO):
 
         parser.add_argument('-w', '--work_dir', default='./work_dir/tmp', help='the work folder for storing results')
         parser.add_argument('-c', '--config', default=None, help='path to the configuration file')
+        
+        # data override
+        parser.add_argument('--data_path', default=None, help='override the data_path defined in config for both train and test feeder args')
 
         # processor
         parser.add_argument('--phase', default='train', help='must be train or test')

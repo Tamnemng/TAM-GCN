@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
+import numpy as np
 
 class Model(nn.Module):
     def __init__(self, num_class=10, pretrained=True, **kwargs):

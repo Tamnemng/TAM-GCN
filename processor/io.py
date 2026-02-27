@@ -32,7 +32,7 @@ class IO():
         parser = self.get_parser()
 
         # load arg form config file
-        p = parser.parse_args(argv)
+        p, _ = parser.parse_known_args(argv)
         if p.config is not None:
             # load config file
             with open(p.config, 'r') as f:
@@ -47,7 +47,7 @@ class IO():
 
             parser.set_defaults(**default_arg)
 
-        self.arg = parser.parse_args(argv)
+        self.arg, _ = parser.parse_known_args(argv)
 
     def init_environment(self):
         self.io = torchlight.IO(
@@ -98,6 +98,9 @@ class IO():
 
         parser.add_argument('-w', '--work_dir', default='./work_dir/tmp', help='the work folder for storing results')
         parser.add_argument('-c', '--config', default=None, help='path to the configuration file')
+        
+        # data override
+        parser.add_argument('--data_path', default=None, help='override the data_path defined in config for both train and test feeder args')
 
         # processor
         parser.add_argument('--use_gpu', type=str2bool, default=True, help='use GPUs or not')
