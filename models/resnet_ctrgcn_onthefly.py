@@ -30,8 +30,16 @@ class CrossModalAttention(nn.Module):
             nn.Sigmoid()
         )
         
-    def forward(self, rgb_feat, skel_grid):
+    def forward(self, rgb_feat, skel_grid, exp_type='normal'):
         B, C, H, W = rgb_feat.shape
+        
+        # EXPERIMENTS: Modifying skel_grid before any attention logic
+        if exp_type == 'noise':
+            skel_grid = torch.randn_like(skel_grid)
+        elif exp_type == 'ones':
+            skel_grid = torch.ones_like(skel_grid)
+        elif exp_type == 'zeros':
+            skel_grid = torch.zeros_like(skel_grid)
         
         # --- BƯỚC 1: CHANNEL ATTENTION ---
         skel_flat = skel_grid.view(B, -1)                      # (B, 25)
@@ -41,6 +49,10 @@ class CrossModalAttention(nn.Module):
         # Nhân Channel Attention vào RGB trước (giống CBAM)
         feat_ca = rgb_feat * ch_attn                           # (B, C, H, W)
         
+        # EXPERIMENT: Bypass spatial attention, only use channel attention
+        if exp_type == 'no_spatial':
+            return rgb_feat + feat_ca
+            
         # --- BƯỚC 2: SPATIAL ATTENTION (CROSS-MODAL) ---
         # Upsample skeleton grid lên kích thước của RGB feature map
         skel_sp = F.interpolate(skel_grid, size=(H, W), mode='bilinear', align_corners=False) # (B, 1, H, W)
@@ -62,8 +74,10 @@ class CrossModalAttention(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, num_class, pretrained=True, temporal_rgb_frames=5):
+    def __init__(self, num_class, pretrained=True, temporal_rgb_frames=5, exp_type='normal'):
         super(Model, self).__init__()
+        
+        self.exp_type = exp_type  # 'normal', 'noise', 'ones', 'zeros', 'no_spatial'
         
         # The processor will inject the frozen CTR-GCN instance here.
         self.ctrgcn = ''
@@ -148,7 +162,7 @@ class Model(nn.Module):
         x = self.layer2(x)         # (B, 512, 28, 28)
         
         # ★ Cross-modal injection: skeleton features meet RGB features 
-        x = self.cross_attn(x, skel_grid)  # (B, 512, 28, 28) — fused
+        x = self.cross_attn(x, skel_grid, exp_type=self.exp_type)  # (B, 512, 28, 28) — fused
         
         x = self.layer3(x)         # (B, 1024, 14, 14)
         x = self.layer4(x)         # (B, 2048, 7, 7)

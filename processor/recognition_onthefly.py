@@ -25,9 +25,19 @@ class REC_Processor_OnTheFly(REC_Processor):
                             help='Number of warmup epochs for cosine scheduler')
         parser.add_argument('--label_smoothing', type=float, default=0.0,
                             help='Label smoothing factor for CrossEntropyLoss')
+        parser.add_argument('--exp_type', type=str, default=None,
+                            help='Experiment type for cross-attention ablation (normal, noise, ones, zeros, no_spatial)')
+        parser.add_argument('--rgb_path', type=str, default=None,
+                            help='Override the rgb_path defined in config for both train and test feeder args')
         return parser
 
     def load_model(self):
+        # Override exp_type if provided via CLI
+        if getattr(self.arg, 'exp_type', None) is not None:
+            if 'resnet_args' not in self.arg.model_args:
+                self.arg.model_args['resnet_args'] = {}
+            self.arg.model_args['resnet_args']['exp_type'] = self.arg.exp_type
+
         # Load the combined ResNet + CTR-GCN Wrapper
         self.model = self.io.load_model(self.arg.model, **(self.arg.model_args['resnet_args']))
         
@@ -48,6 +58,17 @@ class REC_Processor_OnTheFly(REC_Processor):
         # Label smoothing for better generalization
         label_smoothing = getattr(self.arg, 'label_smoothing', 0.0)
         self.loss = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    def load_data(self):
+        # Override rgb_path if provided via CLI
+        if getattr(self.arg, 'rgb_path', None) is not None:
+            if hasattr(self.arg, 'train_feeder_args') and isinstance(self.arg.train_feeder_args, dict):
+                self.arg.train_feeder_args['rgb_path'] = self.arg.rgb_path
+            if hasattr(self.arg, 'test_feeder_args') and isinstance(self.arg.test_feeder_args, dict):
+                self.arg.test_feeder_args['rgb_path'] = self.arg.rgb_path
+        
+        # Superclass handles the data_path override and DataLoader creation
+        super(REC_Processor_OnTheFly, self).load_data()
 
     def start(self):
         self.io.print_log(f'Parameters:\n{str(vars(self.arg))}')
