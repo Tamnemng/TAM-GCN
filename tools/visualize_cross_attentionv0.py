@@ -29,7 +29,7 @@ import matplotlib.cm as cm
 sys.path.append(os.getcwd())
 
 from models.ctrgcn import Model as CTR_GCN_Model
-from models.resnet_ctrgcn_ontheflyv1 import Model as CrossModalModel
+from models.resnet_ctrgcn_onthefly import Model as CrossModalModel
 from feeder.feeder_nucla_fused_ctr_resnet import Feeder
 
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -108,51 +108,51 @@ def denormalize_image(tensor):
 
 
 def extract_attention_maps(model, skeleton, rgb, device):
-    """Run forward pass and extract intermediate attention maps + Grad-CAM.
-    
-    Updated for V1 model architecture:
-      - Uses _build_skel_grid_v1 (learnable Conv1d projection)
-      - Uses spatial_refine (residual Conv refinement) before spatial_conv
-    """
+    """Run forward pass and extract intermediate attention maps + Grad-CAM."""
     skeleton = torch.as_tensor(skeleton).unsqueeze(0).float().to(device)
     rgb = torch.as_tensor(rgb).unsqueeze(0).float().to(device)
     rgb.requires_grad = False
 
-    # ===== Step 1: Get skeleton grid (V1: learnable skel_proj) =====
+    # ===== Step 1: Get skeleton grid (same as model._build_skel_grid) =====
     with torch.no_grad():
-        _, feature_s = model.ctrgcn.extract_feature(skeleton)  # (1, 256, 13, 20, 1)
+        _, feature_s = model.ctrgcn.extract_feature(skeleton)
+        intensity = (feature_s * feature_s).sum(dim=1) ** 0.5
+        intensity = torch.abs(intensity)
+        B = intensity.shape[0]
+        flat = intensity.view(B, -1)
+        f_min = flat.min(dim=1, keepdim=True)[0]
+        f_max = flat.max(dim=1, keepdim=True)[0]
+        diff = f_max - f_min
+        diff[diff == 0] = 1e-6
+        flat_norm = 255.0 * (flat - f_min) / diff
+        intensity_norm = flat_norm.view_as(intensity)
 
-    # V1: skel_proj is OUTSIDE no_grad so it gets gradients during training
-    # For visualization we don't need gradients, but we use the same path
-    with torch.no_grad():
-        skel_grid = model._build_skel_grid_v1(feature_s.detach())  # (1, 1, 5, 5)
+    skel_grid = model._build_skel_grid(intensity_norm.detach())  # (1, 1, 5, 5)
 
     # ===== Step 2: Run RGB through ResNet stages and capture attention =====
     x = model.stem(rgb)
     x = model.layer1(x)
     x = model.layer2(x)  # (1, 512, 28, 28)
 
-    # Extract spatial attention from cross_attn module (V1 logic)
+    # Extract spatial attention from cross_attn module
     with torch.no_grad():
-        B, C, H, W = x.shape
+        skel_flat = skel_grid.view(1, -1)
+        ch_attn = model.cross_attn.channel_attn(skel_flat)  # (1, 512)
         
-        # Channel attention
-        skel_flat = skel_grid.view(1, -1)                          # (1, 25)
-        ch_attn = model.cross_attn.channel_attn(skel_flat)         # (1, 512)
-        ch_attn_expanded = ch_attn.unsqueeze(-1).unsqueeze(-1)     # (1, 512, 1, 1)
-        feat_ca = x * ch_attn_expanded                             # (1, 512, 28, 28)
+        # Tính toán feat_ca giống hệt forward pass
+        ch_attn_expanded = ch_attn.unsqueeze(-1).unsqueeze(-1)
+        feat_ca = x * ch_attn_expanded
         
-        # V1: Spatial attention with learned refinement
-        skel_up = F.interpolate(skel_grid, size=(H, W), mode='bilinear', align_corners=False)
-        skel_sp = skel_up + model.cross_attn.spatial_refine(skel_up)  # ★ V1 residual refine
+        # Spatial theo cơ chế mới (Concat RGB Max, RGB Avg, Skel)
+        skel_sp = F.interpolate(skel_grid, size=(28, 28), mode='bilinear', align_corners=False)
+        rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]
+        rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)
+        sp_input = torch.cat([rgb_max, rgb_avg, skel_sp], dim=1)
         
-        rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]       # (1, 1, 28, 28)
-        rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)         # (1, 1, 28, 28)
-        sp_input = torch.cat([rgb_max, rgb_avg, skel_sp], dim=1)   # (1, 3, 28, 28)
-        
-        sp_attn = model.cross_attn.spatial_conv(sp_input)           # (1, 1, 28, 28)
+        sp_attn = model.cross_attn.spatial_conv(sp_input)  # (1, 1, 28, 28)
 
     # ===== Step 3: Grad-CAM on layer4 =====
+    # Forward with gradient tracking
     gradcam_features = {}
 
     def save_activation(name):
@@ -191,16 +191,14 @@ def extract_attention_maps(model, skeleton, rgb, device):
     if cam.max() > 0:
         cam = cam / cam.max()
 
-    # Capture skeleton spatial maps for comparison
+    # Also capture the interpolated grid BEFORE spatial_proj (for comparison)
     with torch.no_grad():
-        sp_bilinear = F.interpolate(skel_grid, size=(28, 28), mode='bilinear', align_corners=False)
-        sp_refined = sp_bilinear + model.cross_attn.spatial_refine(sp_bilinear)  # V1 refined
+        sp_before_proj = F.interpolate(skel_grid, size=(28, 28), mode='bilinear', align_corners=False)
 
     return {
         'skel_grid': skel_grid.squeeze().cpu().numpy(),          # (5, 5)
         'spatial_attn': sp_attn.squeeze().cpu().numpy(),         # (28, 28)
-        'sp_before_proj': sp_bilinear.squeeze().cpu().numpy(),   # (28, 28) raw bilinear
-        'sp_refined': sp_refined.squeeze().cpu().numpy(),        # (28, 28) after spatial_refine
+        'sp_before_proj': sp_before_proj.squeeze().cpu().numpy(),# (28, 28)
         'channel_attn': ch_attn.squeeze().cpu().numpy(),         # (512,)
         'gradcam': cam,                                          # (224, 224)
         'pred_class': pred_class,
@@ -255,58 +253,36 @@ def plot_sample(rgb_tensor, label, attn_data, save_path, sample_name=''):
 
 
 def log_spatial_proj_weights(model):
-    """Log V1 model weights: skel_proj, spatial_refine, and spatial_conv."""
-    print('\n' + '=' * 60)
-    print('  V1 MODEL WEIGHTS')
-    print('=' * 60)
-    
-    # --- 1. skel_proj (Conv1d 256→1 + ReLU, learnable skeleton projection) ---
-    print('\n  [1] SKEL_PROJ (Conv1d 256→1 + ReLU):')
-    proj_conv = model.skel_proj[0]  # Conv1d(256, 1, 1)
-    w = proj_conv.weight.detach().cpu().numpy().squeeze()  # (256,)
-    print(f'    Conv1d weight: mean={w.mean():.4f}, std={w.std():.4f}, min={w.min():.4f}, max={w.max():.4f}')
-    if proj_conv.bias is not None:
-        print(f'    Conv1d bias: {proj_conv.bias.detach().cpu().item():.4f}')
-    top5 = w.argsort()[-5:][::-1]
-    bot5 = w.argsort()[:5]
-    print(f'    Top 5 GCN channels: {["%d(%.4f)" % (i, w[i]) for i in top5]}')
-    print(f'    Bot 5 GCN channels: {["%d(%.4f)" % (i, w[i]) for i in bot5]}')
-    
-    # --- 2. spatial_refine (2× Conv2d residual refinement) ---
-    print('\n  [2] SPATIAL_REFINE (residual Conv refinement network):')
-    ref_conv1 = model.cross_attn.spatial_refine[0]  # Conv2d(1, 8, 3)
-    ref_bn1 = model.cross_attn.spatial_refine[1]    # BN(8)
-    ref_conv2 = model.cross_attn.spatial_refine[3]  # Conv2d(8, 1, 3)
-    ref_bn2 = model.cross_attn.spatial_refine[4]    # BN(1)
-    w1 = ref_conv1.weight.detach().cpu().numpy()
-    w2 = ref_conv2.weight.detach().cpu().numpy()
-    print(f'    Conv2d_1 (1→8, 3×3): mean={w1.mean():.4f}, std={w1.std():.4f}')
-    print(f'    BN_1 gamma={ref_bn1.weight.detach().cpu().mean().item():.4f}')
-    print(f'    Conv2d_2 (8→1, 3×3): mean={w2.mean():.4f}, std={w2.std():.4f}')
-    print(f'    BN_2 gamma={ref_bn2.weight.detach().cpu().item():.4f}, beta={ref_bn2.bias.detach().cpu().item():.4f}')
-    
-    # --- 3. spatial_conv (final cross-modal spatial attention) ---
-    print('\n  [3] SPATIAL_CONV (Conv2d 3→1, 7×7 + BN + Sigmoid):')
+    """Log the spatial_conv Conv2d and BN weights once."""
     conv = model.cross_attn.spatial_conv[0]  # Conv2d(3, 1, 7, 7)
     bn = model.cross_attn.spatial_conv[1]    # BatchNorm2d(1)
-    w = conv.weight.detach().cpu().numpy().squeeze()  # (3, 7, 7)
-    channels = ["RGB MaxPool", "RGB AvgPool", "Refined Skeleton"]
-    for i, c_name in enumerate(channels):
-        print(f'    Kernel cho kênh {c_name}: mean={w[i].mean():.4f}, min={w[i].min():.4f}, max={w[i].max():.4f}')
-    print(f'    BN gamma={bn.weight.detach().cpu().item():.4f}, beta={bn.bias.detach().cpu().item():.4f}')
-    print(f'    BN run_mean={bn.running_mean.detach().cpu().item():.4f}, run_var={bn.running_var.detach().cpu().item():.4f}')
     
-    print('\n  => V1: Skeleton grid là kết quả của Conv1d LEARNABLE (có gradient)')
-    print('  => Spatial map được REFINED bởi residual Conv network trước khi cross-modal')
+    print('\n' + '=' * 60)
+    print('  SPATIAL_CONV WEIGHTS (Conv2d 3-channel + BatchNorm2d + Sigmoid)')
+    print('=' * 60)
+    w = conv.weight.detach().cpu().numpy().squeeze()  # (3, 7, 7)
+    # Lớp bias của Conv2d hiện tại bị tắt (bias=False)
+    # b = conv.bias.detach().cpu().numpy().squeeze()
+    
+    channels = ["RGB MaxPool", "RGB AvgPool", "Skeleton Grid"]
+    for i, c_name in enumerate(channels):
+        print(f'  Conv2d kernel (7x7) cho kênh: {c_name}')
+        # Log giá trị trung bình/min/max của từng kernel thay vì in cả ma trận 7x7 để đỡ rối mắt
+        print(f'    Mean={w[i].mean():.4f}, Min={w[i].min():.4f}, Max={w[i].max():.4f}')
+        
+    print(f'  BN weight (gamma): {bn.weight.detach().cpu().item():.4f}')
+    print(f'  BN bias (beta):    {bn.bias.detach().cpu().item():.4f}')
+    print(f'  BN running_mean:   {bn.running_mean.detach().cpu().item():.4f}')
+    print(f'  BN running_var:    {bn.running_var.detach().cpu().item():.4f}')
+    print(f'  => Spatial map là sự kết hợp của nội dung ảnh (RGB) và gợi ý (Skeleton)')
     print('=' * 60)
 
 
 def log_attention_details(sample_name, label, attn_data):
-    """Print detailed numerical info for one sample (V1 version)."""
+    """Print detailed numerical info for one sample."""
     grid = attn_data['skel_grid']          # (5, 5)
     sp = attn_data['spatial_attn']         # (28, 28)
-    sp_raw = attn_data['sp_before_proj']   # (28, 28) bilinear only
-    sp_ref = attn_data['sp_refined']       # (28, 28) after spatial_refine
+    sp_raw = attn_data['sp_before_proj']   # (28, 28)
     ch = attn_data['channel_attn']         # (512,)
     logits = attn_data['output_logits']    # (10,)
     pred = attn_data['pred_class']
@@ -315,29 +291,29 @@ def log_attention_details(sample_name, label, attn_data):
     print(f'  SAMPLE: {sample_name}  |  GT: {LABEL_NAMES[label]}  |  Pred: {LABEL_NAMES[pred]}')
     print(f'{"~" * 60}')
     
-    # 1. Skeleton grid (V1: from learnable Conv1d projection)
-    print(f'\n  [1] SKELETON GRID (5x5) - V1 learnable skel_proj:')
+    # 1. Skeleton grid
+    print(f'\n  [1] SKELETON GRID (5x5) - raw values from CTR-GCN:')
     for i, name in enumerate(PART_NAMES):
         vals = '  '.join(f'{v:.3f}' for v in grid[i])
         print(f'    {name:8s}: [{vals}]')
     
-    # 2. Spatial attention: Bilinear → Refined → Final
-    band_h = 28 // 5
+    # 2. Spatial attention BEFORE vs AFTER spatial_proj
+    # Split into 5 horizontal bands (matching STROI rows)
+    band_h = 28 // 5  # ~5 pixels per band
     print(f'\n  [2] SPATIAL ATTENTION (per body-part band):')
-    print(f'    {"Part":8s}  {"Bilinear":>12s}  {"Refined":>12s}  {"Final":>12s}  {"Direction":>10s}')
-    print(f'    {"-"*8}  {"-"*12}  {"-"*12}  {"-"*12}  {"-"*10}')
+    print(f'    {"Part":8s}  {"Before proj":>12s}  {"After proj":>12s}  {"Direction":>10s}')
+    print(f'    {"-"*8}  {"-"*12}  {"-"*12}  {"-"*10}')
     for i, name in enumerate(PART_NAMES):
         r_start = i * band_h
         r_end = min((i + 1) * band_h, 28)
         raw_mean = sp_raw[r_start:r_end, :].mean()
-        ref_mean = sp_ref[r_start:r_end, :].mean()
-        final_mean = sp[r_start:r_end, :].mean()
-        direction = 'SAME' if (raw_mean > sp_raw.mean()) == (final_mean > sp.mean()) else 'FLIPPED'
-        print(f'    {name:8s}  {raw_mean:12.4f}  {ref_mean:12.4f}  {final_mean:12.4f}  {direction:>10s}')
-    print(f'    {"":-<8}  {"":-<12}  {"":-<12}  {"":-<12}')
-    print(f'    {"Overall":8s}  {sp_raw.mean():12.4f}  {sp_ref.mean():12.4f}  {sp.mean():12.4f}')
-    print(f'    {"":8s}  min={sp_raw.min():.4f}   min={sp_ref.min():.4f}   min={sp.min():.4f}')
-    print(f'    {"":8s}  max={sp_raw.max():.4f}   max={sp_ref.max():.4f}   max={sp.max():.4f}')
+        proj_mean = sp[r_start:r_end, :].mean()
+        direction = 'SAME' if (raw_mean > sp_raw.mean()) == (proj_mean > sp.mean()) else 'FLIPPED'
+        print(f'    {name:8s}  {raw_mean:12.4f}  {proj_mean:12.4f}  {direction:>10s}')
+    print(f'    {"":-<8}  {"":-<12}  {"":-<12}')
+    print(f'    {"Overall":8s}  {sp_raw.mean():12.4f}  {sp.mean():12.4f}')
+    print(f'    {"":8s}  min={sp_raw.min():.4f}   min={sp.min():.4f}')
+    print(f'    {"":8s}  max={sp_raw.max():.4f}   max={sp.max():.4f}')
     
     # 3. Channel attention stats
     print(f'\n  [3] CHANNEL ATTENTION (512 channels):')

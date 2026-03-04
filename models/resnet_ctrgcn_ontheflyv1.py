@@ -2,8 +2,9 @@
 ResNet + CTR-GCN On-The-Fly V1
 ================================
 Changes from V0:
-  1. Conv1d(256→1) LEARNABLE replaces fixed L2 norm for skeleton channel projection
+  1. Conv1d(256→1) + ReLU LEARNABLE replaces fixed L2 norm for skeleton channel projection
      → Model learns which GCN channels are important (gets gradients!)
+     → ReLU keeps output non-negative like L2 norm, avoids BN+Sigmoid contrast collapse
   2. All 20 joints grouped into 5 body parts by averaging (instead of picking 1 representative)
      → Richer skeleton representation, less information loss
   3. Learned spatial refinement (Conv2d) after bilinear upsampling of skeleton grid
@@ -93,8 +94,9 @@ class Model(nn.Module):
     """V1: Learnable skeleton projection + body part grouping.
     
     Key improvements over V0:
-      1. skel_proj (Conv1d): learns which of 256 GCN channels matter → trainable!
+      1. skel_proj (Conv1d + ReLU): learns which of 256 GCN channels matter → trainable!
          (V0 used fixed L2 norm → no gradient, all channels weighted equally)
+         ReLU keeps non-negative output like L2 norm, avoids BN+Sigmoid contrast collapse
       2. part_groups: averages ALL joints in each body region
          (V0 picked only 1 representative joint per part → 75% joints discarded)
       3. spatial_refine: learned upsampling refinement
@@ -121,12 +123,13 @@ class Model(nn.Module):
         
         # ──── ★ V1: Learnable skeleton channel projection ────
         # Replaces: intensity = (feature_s ** 2).sum(dim=1) ** 0.5  (L2 norm, fixed)
-        # With:     Conv1d(256→1) that learns which GCN channels are important
+        # With:     Conv1d(256→1) + ReLU that learns which GCN channels are important
+        # NOTE: BN+Sigmoid causes contrast collapse (all values → ~0.5)
+        #       ReLU keeps output non-negative like L2 norm, preserves high contrast
         gcn_channels = 256  # CTR-GCN last layer output channels
         self.skel_proj = nn.Sequential(
-            nn.Conv1d(gcn_channels, 1, kernel_size=1, bias=False),
-            nn.BatchNorm1d(1),
-            nn.Sigmoid()                                         # Output ∈ [0, 1]
+            nn.Conv1d(gcn_channels, 1, kernel_size=1, bias=True),
+            nn.ReLU(inplace=True)                                # Output ∈ [0, ∞)
         )
         
         # ──── Cross-modal attention V1 (with spatial refinement) ────
@@ -156,7 +159,7 @@ class Model(nn.Module):
         
         Pipeline:
           GCN output (B, 256, 13, 20, 1)                         ← frozen features
-            ↓ Conv1d(256, 1, 1) + BN + Sigmoid                   ← LEARNABLE (has gradients!)
+            ↓ Conv1d(256, 1, 1) + ReLU                           ← LEARNABLE (has gradients!)
           (B, 1, 13, 20) = per-joint, per-timestep importance
             ↓ Group 20 joints → 5 body parts (avg)               ← uses ALL joints
           (B, 5, 13)
