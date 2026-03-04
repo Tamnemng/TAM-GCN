@@ -92,7 +92,7 @@ class REC_Processor_OnTheFly(REC_Processor):
                 if acc is not None and acc > best_acc:
                     best_acc = acc
                     self.save_model(name='best_model')
-                    self.io.print_log(f'\t★ New best accuracy: {best_acc*100:.2f}%')
+                    self.io.print_log(f'\t[*] New best accuracy: {best_acc*100:.2f}%')
         
     def adjust_learning_rate(self, epoch, step, base_lr):
         """Cosine annealing with warmup, or fallback to step decay."""
