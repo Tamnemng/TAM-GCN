@@ -34,21 +34,23 @@ class CrossModalAttentionV1(nn.Module):
             nn.Sigmoid()
         )
         
-        # 2. SPATIAL REFINEMENT: learned conv to sharpen upsampled skeleton grid
-        #    Bilinear 5×5→28×28 is too smooth; this refine network adds local detail
+        # 2. SPATIAL REFINEMENT FOR SKELETON
+        #    Keep positive to avoid 'flip', remove BN at output to avoid arbitrary shifting
+        #    Add bias=True in the last conv to learn a dynamic threshold if it wants.
         self.spatial_refine = nn.Sequential(
             nn.Conv2d(1, 8, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(8),
             nn.ReLU(inplace=True),
-            nn.Conv2d(8, 1, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(1),
+            nn.Conv2d(8, 1, kernel_size=3, padding=1, bias=True),
+            nn.ReLU(inplace=True) # Ensure output remains >= 0 (no logic flip)
         )
         
-        # 3. SPATIAL ATTENTION: cross-modal (RGB pooled + refined skeleton)
-        self.spatial_conv = nn.Sequential(
-            nn.Conv2d(3, 1, kernel_size=7, padding=3, bias=False),
-            nn.BatchNorm2d(1),
-            nn.Sigmoid()
+        # 3. SPATIAL ATTENTION: cross-modal
+        # We separate RGB processing and Skeleton processing instead of generic 'cat' then Conv
+        self.rgb_spatial_conv = nn.Sequential(
+            nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False),
+            nn.BatchNorm2d(1)
+            # no sigmoid here yet
         )
 
     def forward(self, rgb_feat, skel_grid, exp_type='normal'):
@@ -75,15 +77,18 @@ class CrossModalAttentionV1(nn.Module):
         # Bilinear upsample skeleton grid 5×5 → 28×28
         skel_up = F.interpolate(skel_grid, size=(H, W), mode='bilinear', align_corners=False)
         # ★ V1: Refine with learned convs (residual connection)
-        skel_sp = skel_up + self.spatial_refine(skel_up)        # (B, 1, H, W)
+        # Ensure it stays positive by doing ReLU after addition
+        skel_sp = F.relu(skel_up + self.spatial_refine(skel_up)) # (B, 1, H, W)
         
         # RGB spatial cues
         rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]   # (B, 1, H, W)
         rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)     # (B, 1, H, W)
+        rgb_sp_feat = torch.cat([rgb_max, rgb_avg], dim=1)     # (B, 2, H, W)
+        rgb_sp_logits = self.rgb_spatial_conv(rgb_sp_feat)     # (B, 1, H, W)
         
-        # Cross-modal spatial attention
-        sp_input = torch.cat([rgb_max, rgb_avg, skel_sp], dim=1) # (B, 3, H, W)
-        sp_attn = self.spatial_conv(sp_input)                    # (B, 1, H, W)
+        # Combine RGB attention logits and Skeleton intensity additively, then Sigmoid
+        # This guarantees that higher skeleton signal directly leads to HIGHER attention (no flip!)
+        sp_attn = torch.sigmoid(rgb_sp_logits + skel_sp)       # (B, 1, H, W)
         
         # --- BƯỚC 3: MODULATION + RESIDUAL ---
         modulated = feat_ca * sp_attn                            # (B, C, H, W)

@@ -142,15 +142,16 @@ def extract_attention_maps(model, skeleton, rgb, device):
         ch_attn_expanded = ch_attn.unsqueeze(-1).unsqueeze(-1)     # (1, 512, 1, 1)
         feat_ca = x * ch_attn_expanded                             # (1, 512, 28, 28)
         
-        # V1: Spatial attention with learned refinement
+        # V1: Spatial attention with learned refinement (ReLU keeps it positive)
         skel_up = F.interpolate(skel_grid, size=(H, W), mode='bilinear', align_corners=False)
-        skel_sp = skel_up + model.cross_attn.spatial_refine(skel_up)  # ★ V1 residual refine
+        skel_sp = F.relu(skel_up + model.cross_attn.spatial_refine(skel_up))  # ★ V1 positive residual refine
         
         rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]       # (1, 1, 28, 28)
         rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)         # (1, 1, 28, 28)
-        sp_input = torch.cat([rgb_max, rgb_avg, skel_sp], dim=1)   # (1, 3, 28, 28)
+        rgb_sp_feat = torch.cat([rgb_max, rgb_avg], dim=1)         # (1, 2, 28, 28)
         
-        sp_attn = model.cross_attn.spatial_conv(sp_input)           # (1, 1, 28, 28)
+        rgb_sp_logits = model.cross_attn.rgb_spatial_conv(rgb_sp_feat)  # (1, 1, 28, 28)
+        sp_attn = torch.sigmoid(rgb_sp_logits + skel_sp)           # (1, 1, 28, 28)
 
     # ===== Step 3: Grad-CAM on layer4 =====
     gradcam_features = {}
@@ -194,7 +195,7 @@ def extract_attention_maps(model, skeleton, rgb, device):
     # Capture skeleton spatial maps for comparison
     with torch.no_grad():
         sp_bilinear = F.interpolate(skel_grid, size=(28, 28), mode='bilinear', align_corners=False)
-        sp_refined = sp_bilinear + model.cross_attn.spatial_refine(sp_bilinear)  # V1 refined
+        sp_refined = F.relu(sp_bilinear + model.cross_attn.spatial_refine(sp_bilinear))  # V1 refined (kept positive)
 
     return {
         'skel_grid': skel_grid.squeeze().cpu().numpy(),          # (5, 5)
@@ -273,24 +274,24 @@ def log_spatial_proj_weights(model):
     print(f'    Bot 5 GCN channels: {["%d(%.4f)" % (i, w[i]) for i in bot5]}')
     
     # --- 2. spatial_refine (2× Conv2d residual refinement) ---
-    print('\n  [2] SPATIAL_REFINE (residual Conv refinement network):')
+    print('\n  [2] SPATIAL_REFINE (residual Conv refinement network, positive output):')
     ref_conv1 = model.cross_attn.spatial_refine[0]  # Conv2d(1, 8, 3)
     ref_bn1 = model.cross_attn.spatial_refine[1]    # BN(8)
     ref_conv2 = model.cross_attn.spatial_refine[3]  # Conv2d(8, 1, 3)
-    ref_bn2 = model.cross_attn.spatial_refine[4]    # BN(1)
     w1 = ref_conv1.weight.detach().cpu().numpy()
     w2 = ref_conv2.weight.detach().cpu().numpy()
     print(f'    Conv2d_1 (1→8, 3×3): mean={w1.mean():.4f}, std={w1.std():.4f}')
     print(f'    BN_1 gamma={ref_bn1.weight.detach().cpu().mean().item():.4f}')
     print(f'    Conv2d_2 (8→1, 3×3): mean={w2.mean():.4f}, std={w2.std():.4f}')
-    print(f'    BN_2 gamma={ref_bn2.weight.detach().cpu().item():.4f}, beta={ref_bn2.bias.detach().cpu().item():.4f}')
+    if ref_conv2.bias is not None:
+        print(f'    Conv2d_2 bias: {ref_conv2.bias.detach().cpu().mean().item():.4f}')
     
-    # --- 3. spatial_conv (final cross-modal spatial attention) ---
-    print('\n  [3] SPATIAL_CONV (Conv2d 3→1, 7×7 + BN + Sigmoid):')
-    conv = model.cross_attn.spatial_conv[0]  # Conv2d(3, 1, 7, 7)
-    bn = model.cross_attn.spatial_conv[1]    # BatchNorm2d(1)
-    w = conv.weight.detach().cpu().numpy().squeeze()  # (3, 7, 7)
-    channels = ["RGB MaxPool", "RGB AvgPool", "Refined Skeleton"]
+    # --- 3. rgb_spatial_conv (cross-modal spatial attention base) ---
+    print('\n  [3] RGB_SPATIAL_CONV (Conv2d 2→1, 7×7 + BN):')
+    conv = model.cross_attn.rgb_spatial_conv[0]  # Conv2d(2, 1, 7, 7)
+    bn = model.cross_attn.rgb_spatial_conv[1]    # BatchNorm2d(1)
+    w = conv.weight.detach().cpu().numpy().squeeze()  # (2, 7, 7)
+    channels = ["RGB MaxPool", "RGB AvgPool"]
     for i, c_name in enumerate(channels):
         print(f'    Kernel cho kênh {c_name}: mean={w[i].mean():.4f}, min={w[i].min():.4f}, max={w[i].max():.4f}')
     print(f'    BN gamma={bn.weight.detach().cpu().item():.4f}, beta={bn.bias.detach().cpu().item():.4f}')
