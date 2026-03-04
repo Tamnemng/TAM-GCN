@@ -325,20 +325,42 @@ def log_attention_details(sample_name, label, attn_data):
     # 2. Spatial attention: Bilinear → Refined → Final
     band_h = 28 // 5
     print(f'\n  [2] SPATIAL ATTENTION (per body-part band):')
-    print(f'    {"Part":8s}  {"Bilinear":>12s}  {"Refined":>12s}  {"Final":>12s}  {"Direction":>10s}')
-    print(f'    {"-"*8}  {"-"*12}  {"-"*12}  {"-"*12}  {"-"*10}')
+    print(f'    {"Part":8s}  {"Skel(raw)":>12s}  {"Skel(ref)":>12s}  {"Final":>12s}  {"Skel→Final":>12s}  {"Rank":>5s}')
+    print(f'    {"-"*8}  {"-"*12}  {"-"*12}  {"-"*12}  {"-"*12}  {"-"*5}')
+    
+    part_data = []
     for i, name in enumerate(PART_NAMES):
         r_start = i * band_h
         r_end = min((i + 1) * band_h, 28)
         raw_mean = sp_raw[r_start:r_end, :].mean()
         ref_mean = sp_ref[r_start:r_end, :].mean()
         final_mean = sp[r_start:r_end, :].mean()
-        direction = 'SAME' if (raw_mean > sp_raw.mean()) == (final_mean > sp.mean()) else 'FLIPPED'
-        print(f'    {name:8s}  {raw_mean:12.4f}  {ref_mean:12.4f}  {final_mean:12.4f}  {direction:>10s}')
+        part_data.append((name, raw_mean, ref_mean, final_mean))
+    
+    # Rank by skeleton intensity (refined) and by final attention
+    skel_rank = sorted(range(5), key=lambda i: part_data[i][2], reverse=True)
+    final_rank = sorted(range(5), key=lambda i: part_data[i][3], reverse=True)
+    skel_rank_map = {idx: rank+1 for rank, idx in enumerate(skel_rank)}
+    final_rank_map = {idx: rank+1 for rank, idx in enumerate(final_rank)}
+    
+    for i, (name, raw_mean, ref_mean, final_mean) in enumerate(part_data):
+        # Correlation: does higher skeleton lead to higher final? Compare ranks
+        s_rank = skel_rank_map[i]
+        f_rank = final_rank_map[i]
+        correlation = '✓' if abs(s_rank - f_rank) <= 1 else f'Δ{abs(s_rank - f_rank)}'
+        print(f'    {name:8s}  {raw_mean:12.4f}  {ref_mean:12.4f}  {final_mean:12.4f}  S#{s_rank}→F#{f_rank} {correlation:>5s}')
+    
     print(f'    {"":-<8}  {"":-<12}  {"":-<12}  {"":-<12}')
     print(f'    {"Overall":8s}  {sp_raw.mean():12.4f}  {sp_ref.mean():12.4f}  {sp.mean():12.4f}')
     print(f'    {"":8s}  min={sp_raw.min():.4f}   min={sp_ref.min():.4f}   min={sp.min():.4f}')
     print(f'    {"":8s}  max={sp_raw.max():.4f}   max={sp_ref.max():.4f}   max={sp.max():.4f}')
+    
+    # Spearman rank correlation between skeleton and final attention
+    from scipy.stats import spearmanr
+    skel_vals = [d[2] for d in part_data]
+    final_vals = [d[3] for d in part_data]
+    rho, _ = spearmanr(skel_vals, final_vals)
+    print(f'    Skeleton↔Final rank correlation (Spearman ρ): {rho:+.3f}  {"GOOD" if rho > 0.5 else "WEAK" if rho > 0 else "INVERTED"}')
     
     # 3. Channel attention stats
     print(f'\n  [3] CHANNEL ATTENTION (512 channels):')
