@@ -23,7 +23,7 @@ from tqdm import tqdm
 sys.path.append(os.getcwd())
 
 from models.ctrgcn import Model as CTR_GCN_Model
-from models.resnet_ctrgcn_onthefly import Model as OnTheFlyModel
+from models.resnet_ctrgcn_ontheflyv6 import Model as OnTheFlyModel
 from feeder.feeder_nucla_fused_ctr_resnet import Feeder as FusedFeeder
 
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
