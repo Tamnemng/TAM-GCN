@@ -99,6 +99,20 @@ class Model(nn.Module):
             nn.BatchNorm1d(5),
             nn.ReLU(inplace=True),
         )
+        # Init Conv1d weights theo nhóm v2: mỗi part = mean của 4 joints trong nhóm
+        # Khởi đầu từ v2 behavior, rồi fine-tune
+        part_groups = [
+            [0, 1, 2, 3],      # Torso
+            [4, 5, 6, 7],      # Left Arm
+            [8, 9, 10, 11],    # Right Arm
+            [12, 13, 14, 15],  # Left Leg
+            [16, 17, 18, 19],  # Right Leg
+        ]
+        with torch.no_grad():
+            self.joint_to_part[0].weight.zero_()  # (5, 20, 1)
+            for i, group in enumerate(part_groups):
+                for j in group:
+                    self.joint_to_part[0].weight[i, j, 0] = 1.0 / len(group)
 
     def _build_skel_grid(self, intensity_norm):
         """Build (B, 1, 5, T_frames) spatiotemporal skeleton feature grid.
