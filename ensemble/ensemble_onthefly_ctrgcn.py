@@ -1,5 +1,9 @@
-"""
-Ensemble evaluation: On-the-Fly ResNet (skeleton+RGB) + CTR-GCN (skeleton)
+"""Ensemble evaluation: On-the-Fly ResNet V2 (skeleton+RGB) + CTR-GCN (skeleton)
+
+V2 model uses:
+  - Conv1d(256->1) learnable channel projection
+  - Conv1d(20->5) learnable joint-to-part grouping
+  - ConvTranspose2d learned upsampling (5x5 -> 28x28)
 
 Loads both models, runs inference on the val set, and fuses softmax scores.
 The on-the-fly ResNet model already uses CTR-GCN features internally for weighting,
@@ -23,7 +27,7 @@ from tqdm import tqdm
 sys.path.append(os.getcwd())
 
 from models.ctrgcn import Model as CTR_GCN_Model
-from models.resnet_ctrgcn_ontheflyv6 import Model as OnTheFlyModel
+from models.resnet_ctrgcn_ontheflyv2 import Model as OnTheFlyModel
 from feeder.feeder_nucla_fused_ctr_resnet import Feeder as FusedFeeder
 
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -45,7 +49,7 @@ LABEL_NAMES = {
 def parse_args():
     parser = argparse.ArgumentParser(description='Ensemble On-the-Fly ResNet + CTR-GCN')
     parser.add_argument('--ctrgcn_weights', type=str, default='./result/nucla/CTROGC-GCN.pt')
-    parser.add_argument('--onthefly_weights', type=str, default='./work_dir/nucla/resnet_onthefly/epoch61_model.pt')
+    parser.add_argument('--onthefly_weights', type=str, default='C:/Users/nguyn/Downloads/ontheflyv2.pt')
     parser.add_argument('--data_path', type=str, default='C:/Users/nguyn/Downloads/NW-UCLA-ALL/NW-UCLA-ALL')
     parser.add_argument('--rgb_path', type=str, default='C:/ucla_stroi/')
     parser.add_argument('--alpha', type=float, default=1.0,
@@ -147,7 +151,7 @@ def main():
     args = parse_args()
     
     print('=' * 60)
-    print('  ENSEMBLE: On-the-Fly ResNet + CTR-GCN')
+    print('  ENSEMBLE: On-the-Fly ResNet V2 + CTR-GCN')
     print('=' * 60)
     print(f'  OnTheFly weights: {args.onthefly_weights}')
     print(f'  CTR-GCN weights : {args.ctrgcn_weights}')
@@ -214,7 +218,7 @@ def main():
     print_results('CTR-GCN (Skeleton Only)', acc_c, cor_c, tot_c, cls_c)
     
     acc_o, cor_o, tot_o, cls_o = compute_accuracy(onthefly_scores, labels)
-    print_results('On-the-Fly ResNet (Skeleton+RGB)', acc_o, cor_o, tot_o, cls_o)
+    print_results('On-the-Fly ResNet V2 (Skeleton+RGB)', acc_o, cor_o, tot_o, cls_o)
     
     # ---- Ensemble fusion ----
     from scipy.special import softmax
@@ -250,7 +254,7 @@ def main():
     print(f'  SUMMARY')
     print(f'{"="*60}')
     print(f'  CTR-GCN Only:       {acc_c*100:.2f}%')
-    print(f'  OnTheFly ResNet:    {acc_o*100:.2f}%')
+    print(f'  OnTheFly ResNet V2: {acc_o*100:.2f}%')
     print(f'  Ensemble (α={best_alpha}):  {best_acc*100:.2f}%')
     improvement = (best_acc - max(acc_c, acc_o)) * 100
     print(f'  Improvement:        {improvement:+.2f}% over best single model')

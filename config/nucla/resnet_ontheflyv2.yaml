@@ -20,7 +20,7 @@ test_feeder_args:
   rgb_path: C:/ucla_stroi/
   temporal_rgb_frames: 5
 
-# model — V2: V0 + average joint grouping
+# model — V2: Learnable Conv1d projection + Conv1d joint-to-part + ConvTranspose2d upsample
 model: models.resnet_ctrgcn_ontheflyv2.Model
 model_args:
   resnet_args:
