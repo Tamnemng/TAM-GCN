@@ -1,4 +1,4 @@
-work_dir: ./work_dir/nucla/resnet_ontheflyv7
+work_dir: ./work_dir/nucla/resnet_ontheflyv8
 
 # feeder
 feeder: feeder.feeder_nucla_fused_ctr_resnet.Feeder
@@ -20,7 +20,8 @@ test_feeder_args:
   rgb_path: C:/Users/nguyn/Downloads/ucla_fivefs-20260302T172922Z-1-001/ucla_fivefs/
   temporal_rgb_frames: 5
 
-model: models.resnet_ctrgcn_ontheflyv7.Model
+# model — V8: Sharp spatial attention + spatial-wise gating
+model: models.resnet_ctrgcn_ontheflyv8.Model
 model_args:
   resnet_args:
     num_class: 10
