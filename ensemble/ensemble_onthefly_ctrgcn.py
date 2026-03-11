@@ -27,8 +27,21 @@ from tqdm import tqdm
 sys.path.append(os.getcwd())
 
 from models.ctrgcn import Model as CTR_GCN_Model
-from models.resnet_ctrgcn_ontheflyv2 import Model as OnTheFlyModel
 from feeder.feeder_nucla_fused_ctr_resnet import Feeder as FusedFeeder
+
+MODEL_REGISTRY = {
+    'v0': 'models.resnet_ctrgcn_onthefly',
+    'v2': 'models.resnet_ctrgcn_ontheflyv2',
+    'v7': 'models.resnet_ctrgcn_ontheflyv7',
+    'v8': 'models.resnet_ctrgcn_ontheflyv8',
+    'v9': 'models.resnet_ctrgcn_ontheflyv9',
+    'v10': 'models.resnet_ctrgcn_ontheflyv10',
+}
+
+def get_onthefly_model_class(version):
+    import importlib
+    mod = importlib.import_module(MODEL_REGISTRY[version])
+    return mod.Model
 
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 NUM_CLASS = 10
@@ -49,7 +62,8 @@ LABEL_NAMES = {
 def parse_args():
     parser = argparse.ArgumentParser(description='Ensemble On-the-Fly ResNet + CTR-GCN')
     parser.add_argument('--ctrgcn_weights', type=str, default='./result/nucla/CTROGC-GCN.pt')
-    parser.add_argument('--onthefly_weights', type=str, default='C:/Users/nguyn/Downloads/ontheflyv2.pt')
+    parser.add_argument('--onthefly_version', type=str, default='v9', choices=['v0', 'v2', 'v7', 'v8', 'v9', 'v10'])
+    parser.add_argument('--onthefly_weights', type=str, default='C:/Users/nguyn/Downloads/ontheflyv9.pt')
     parser.add_argument('--data_path', type=str, default='C:/Users/nguyn/Downloads/NW-UCLA-ALL/NW-UCLA-ALL')
     parser.add_argument('--rgb_path', type=str, default='C:/ucla_stroi/')
     parser.add_argument('--alpha', type=float, default=1.0,
@@ -80,12 +94,13 @@ def load_ctrgcn(weights_path, device):
     state_dict = load_weights_robust(weights_path, device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
-    print(f"  ✓ CTR-GCN loaded: {weights_path}")
+    print(f"  [OK] CTR-GCN loaded: {weights_path}")
     return model
 
 
-def load_onthefly(weights_path, ctrgcn_weights_path, device):
+def load_onthefly(weights_path, ctrgcn_weights_path, device, version='v9'):
     """Load the on-the-fly ResNet model and inject frozen CTR-GCN."""
+    OnTheFlyModel = get_onthefly_model_class(version)
     model = OnTheFlyModel(num_class=NUM_CLASS, pretrained=False).to(device)
     
     # Inject CTR-GCN for on-the-fly weighting
@@ -111,7 +126,7 @@ def load_onthefly(weights_path, ctrgcn_weights_path, device):
             loaded += 1
     model.load_state_dict(model_state)
     model.eval()
-    print(f"  ✓ On-the-Fly ResNet loaded ({loaded} params): {weights_path}")
+    print(f"  [OK] On-the-Fly ResNet loaded ({loaded} params): {weights_path}")
     return model
 
 
@@ -142,7 +157,7 @@ def print_results(title, acc, correct, total, class_acc):
     for c in range(NUM_CLASS):
         c_correct, c_total, c_acc = class_acc[c]
         name = LABEL_NAMES.get(c, f'Class {c}')
-        bar = '█' * int(c_acc * 20)
+        bar = '#' * int(c_acc * 20)
         print(f'  {c:2d}. {name:<25s}: {c_acc*100:5.1f}% ({c_correct}/{c_total}) {bar}')
     print(f'{"="*60}')
 
@@ -162,7 +177,7 @@ def main():
     # ---- Load models ----
     print(">>> Loading models...")
     ctrgcn_model = load_ctrgcn(args.ctrgcn_weights, DEVICE)
-    onthefly_model = load_onthefly(args.onthefly_weights, args.ctrgcn_weights, DEVICE)
+    onthefly_model = load_onthefly(args.onthefly_weights, args.ctrgcn_weights, DEVICE, args.onthefly_version)
     
     # ---- Load val data ----
     # The fused feeder returns (skeleton, rgb, label)
@@ -218,7 +233,7 @@ def main():
     print_results('CTR-GCN (Skeleton Only)', acc_c, cor_c, tot_c, cls_c)
     
     acc_o, cor_o, tot_o, cls_o = compute_accuracy(onthefly_scores, labels)
-    print_results('On-the-Fly ResNet V2 (Skeleton+RGB)', acc_o, cor_o, tot_o, cls_o)
+    print_results(f'On-the-Fly ResNet {args.onthefly_version.upper()} (Skeleton+RGB)', acc_o, cor_o, tot_o, cls_o)
     
     # ---- Ensemble fusion ----
     from scipy.special import softmax
@@ -240,22 +255,22 @@ def main():
         combo = onthefly_norm + alpha * ctrgcn_norm
         preds = np.argmax(combo, axis=1)
         acc = (preds == labels).sum() / len(labels)
-        marker = ' ★' if alpha == best_alpha else ''
+        marker = ' *BEST*' if alpha == best_alpha else ''
         if acc > best_acc:
             best_acc = acc
             best_alpha = alpha
-            marker = ' ★'
+            marker = ' *BEST*'
         print(f'  {alpha:<10.1f} {acc*100:<12.2f}{marker}')
     
-    print(f'\n  Best alpha: {best_alpha} → Accuracy: {best_acc*100:.2f}%')
+    print(f'\n  Best alpha: {best_alpha} => Accuracy: {best_acc*100:.2f}%')
     
     # ---- Summary ----
     print(f'\n{"="*60}')
     print(f'  SUMMARY')
     print(f'{"="*60}')
     print(f'  CTR-GCN Only:       {acc_c*100:.2f}%')
-    print(f'  OnTheFly ResNet V2: {acc_o*100:.2f}%')
-    print(f'  Ensemble (α={best_alpha}):  {best_acc*100:.2f}%')
+    print(f'  OnTheFly ResNet {args.onthefly_version.upper()}: {acc_o*100:.2f}%')
+    print(f'  Ensemble (alpha={best_alpha}):  {best_acc*100:.2f}%')
     improvement = (best_acc - max(acc_c, acc_o)) * 100
     print(f'  Improvement:        {improvement:+.2f}% over best single model')
     print(f'{"="*60}')
