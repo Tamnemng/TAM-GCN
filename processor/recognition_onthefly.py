@@ -114,21 +114,42 @@ class REC_Processor_OnTheFly(REC_Processor):
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
     
+    def _check_model_supports_labels(self):
+        """Check once if the model's forward() accepts a 'labels' kwarg (V11+)."""
+        if not hasattr(self, '_supports_labels'):
+            import inspect
+            # Handle DataParallel wrapper
+            model = self.model.module if hasattr(self.model, 'module') else self.model
+            fwd_params = inspect.signature(model.forward).parameters
+            self._supports_labels = 'labels' in fwd_params
+        return self._supports_labels
+
     def train(self):
         self.model.train()
         self.model.ctrgcn.eval() # Keep it in eval mode!
         self.adjust_learning_rate(self.epoch, self.arg.step, self.arg.base_lr)
         loader = self.data_loader['train']
         loss_value = []
+        supports_labels = self._check_model_supports_labels()
         
         for data, rgb, label in loader:
             data = data.float().to(self.dev)
             rgb = rgb.float().to(self.dev)
             label = label.long().to(self.dev)
 
-            # forward
-            output = self.model(data, rgb)
-            loss = self.loss(output, label)
+            # forward — V11+ models may return (output, extra_loss) tuple
+            if supports_labels:
+                result = self.model(data, rgb, labels=label)
+            else:
+                result = self.model(data, rgb)
+            
+            if isinstance(result, tuple):
+                output, extra_loss = result
+            else:
+                output = result
+                extra_loss = 0.0
+
+            loss = self.loss(output, label) + extra_loss
 
             # backward
             self.optimizer.zero_grad()
