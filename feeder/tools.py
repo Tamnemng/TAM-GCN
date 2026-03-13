@@ -3,6 +3,69 @@ import random
 from torchvision import transforms
 import os
 from PIL import Image
+
+
+def valid_crop_resize(data_numpy, valid_frame_num, p_interval, window_size):
+    """Crop valid frames with random/fixed interval, then resize to window_size.
+    From original CTR-GCN feeders/tools.py.
+
+    Args:
+        data_numpy: (C, T, V, M)
+        valid_frame_num: number of non-zero frames
+        p_interval: list — [ratio] for fixed crop, [lo, hi] for random crop
+        window_size: target temporal length
+    """
+    C, T, V, M = data_numpy.shape
+    begin = 0
+    end = valid_frame_num
+
+    if len(p_interval) == 1:
+        p = p_interval[0]
+        bias = int((1 - p) * valid_frame_num / 2)
+        data = data_numpy[:, begin + bias:end - bias, :, :]
+        cropped_length = data.shape[1]
+    else:
+        p = np.random.rand(1) * (p_interval[1] - p_interval[0]) + p_interval[0]
+        cropped_length = np.minimum(np.maximum(int(np.floor(valid_frame_num * p)), 64), valid_frame_num)
+        bias = np.random.randint(0, valid_frame_num - cropped_length + 1)
+        data = data_numpy[:, begin + bias:begin + bias + cropped_length, :, :]
+
+    # Resize to window_size
+    if data.shape[1] == 0:
+        data = np.zeros((C, window_size, V, M), dtype=np.float32)
+    elif data.shape[1] == window_size:
+        pass
+    else:
+        data = data.transpose(1, 0, 2, 3)  # (T', C, V, M)
+        indices = np.linspace(0, data.shape[0] - 1, window_size).astype(int)
+        data = data[indices]
+        data = data.transpose(1, 0, 2, 3)  # (C, T, V, M)
+
+    return data
+
+
+def random_rot(data_numpy):
+    """Random rotation augmentation around 3 axes.
+    From original CTR-GCN feeders/tools.py.
+
+    Args:
+        data_numpy: (C, T, V, M) where C=3 (x, y, z)
+    """
+    def _rot(rot):
+        cos_r, sin_r = np.cos(rot), np.sin(rot)
+        # Rotation around Y-axis (most common for skeleton)
+        R = np.array([[cos_r[0], 0, sin_r[0]],
+                       [0, 1, 0],
+                       [-sin_r[0], 0, cos_r[0]]], dtype=np.float32)
+        return R
+
+    rot = np.random.uniform(-0.3, 0.3, size=1)
+    R = _rot(rot)
+
+    data_numpy = np.einsum('ij,jklm->iklm', R, data_numpy)
+    return data_numpy
+
+
 def centralization(data_numpy): # Bruce
     C, T, V, M = data_numpy.shape
     for t in range(T):

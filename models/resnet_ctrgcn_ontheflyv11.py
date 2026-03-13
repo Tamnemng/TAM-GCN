@@ -281,7 +281,8 @@ class Model(nn.Module):
     """
     def __init__(self, num_class, pretrained=True, temporal_rgb_frames=5,
                  exp_type='normal', proj_channels=8, init_temperature=0.3,
-                 sp_skel_channels=4, consistency_weight=0.1):
+                 sp_skel_channels=4, consistency_weight=0.1,
+                 num_point=20, num_person=1):
         super(Model, self).__init__()
 
         self.exp_type = exp_type
@@ -290,6 +291,7 @@ class Model(nn.Module):
         self.proj_channels = proj_channels
         self.consistency_weight = consistency_weight
         self.num_class = num_class
+        self.num_person = num_person
 
         # ---- ResNet-50 backbone ----
         resnet = models.resnet50(pretrained=pretrained)
@@ -325,17 +327,26 @@ class Model(nn.Module):
 
         # ---- Learnable joint-to-part grouping (from V9) ----
         self.joint_to_part = nn.Sequential(
-            nn.Conv1d(20, 5, kernel_size=1, bias=False),
+            nn.Conv1d(num_point, 5, kernel_size=1, bias=False),
             nn.BatchNorm1d(5),
             nn.ReLU(inplace=True),
         )
-        part_groups = [
-            [0, 1, 2, 3],       # Head/Torso
-            [4, 5, 6, 7],       # Left arm
-            [8, 9, 10, 11],     # Right arm
-            [12, 13, 14, 15],   # Left leg
-            [16, 17, 18, 19],   # Right leg
-        ]
+        if num_point == 25:  # NTU RGB+D (25 joints)
+            part_groups = [
+                [0, 1, 2, 3, 20],           # Head/Torso/Spine
+                [4, 5, 6, 7, 21, 22],       # Left arm + hand tips
+                [8, 9, 10, 11, 23, 24],     # Right arm + hand tips
+                [12, 13, 14, 15],           # Left leg
+                [16, 17, 18, 19],           # Right leg
+            ]
+        else:  # NW-UCLA (20 joints) — default
+            part_groups = [
+                [0, 1, 2, 3],       # Head/Torso
+                [4, 5, 6, 7],       # Left arm
+                [8, 9, 10, 11],     # Right arm
+                [12, 13, 14, 15],   # Left leg
+                [16, 17, 18, 19],   # Right leg
+            ]
         with torch.no_grad():
             self.joint_to_part[0].weight.zero_()
             for i, group in enumerate(part_groups):
@@ -354,13 +365,16 @@ class Model(nn.Module):
 
     def _build_skel_grid(self, feature_s):
         """Single-stage projection → per-channel joint-to-part → temporal pool.
-        Identical to V9.
+        Supports both single-person (M=1) and multi-person (M=2) skeletons.
         """
         B, C, T_new, V, M = feature_s.shape
         K = self.proj_channels
         T_frames = self.temporal_rgb_frames
 
-        feat = feature_s[:, :, :, :, 0]
+        if M > 1:
+            feat = feature_s.mean(dim=4)          # (B, C, T_new, V) — average across persons
+        else:
+            feat = feature_s[:, :, :, :, 0]       # (B, C, T_new, V)
         feat = feat.reshape(B, C, T_new * V)
 
         proj = self.skel_proj(feat)

@@ -1,0 +1,54 @@
+work_dir: ./work_dir/ntu/resnet_ontheflyv11_CV
+
+# feeder
+feeder: feeder.feeder_ntu_fused_ctr_resnet.Feeder
+train_feeder_args:
+  npz_path: G:/NTU60_CV_CLEAN.npz          # <-- SUA LAI DUONG DAN NPZ
+  rgb_path: G:/NTU_STROI/                   # <-- SUA LAI DUONG DAN CHUA STROI IMAGES
+  label_path: train
+  split: CV
+  time_steps: 64
+  temporal_rgb_frames: 5
+  random_flip: True
+  random_choose: True
+
+test_feeder_args:
+  npz_path: G:/NTU60_CV_CLEAN.npz          # <-- SUA LAI DUONG DAN NPZ
+  rgb_path: G:/NTU_STROI/                   # <-- SUA LAI DUONG DAN CHUA STROI IMAGES
+  label_path: val
+  split: CV
+  time_steps: 64
+  temporal_rgb_frames: 5
+
+# model — V11: Confidence-Gated Fusion for NTU-60
+model: models.resnet_ctrgcn_ontheflyv11.Model
+model_args:
+  resnet_args:
+    num_class: 60
+    pretrained: True
+    consistency_weight: 0.1
+    num_point: 25
+    num_person: 2
+  gcn_weights: ./result/ntu/CTRGCN_NTU_CV.pt     # <-- SUA LAI DUONG DAN CTRGCN PRETRAINED
+  gcn_args:
+    num_class: 60
+    num_point: 25
+    num_person: 2
+    graph: graph.ntu_rgb_d.Graph
+    graph_args:
+      labeling_mode: "spatial"
+
+# optim — Cosine annealing with warmup
+weight_decay: 0.0001
+base_lr: 0.005
+lr_scheduler: cosine
+warmup_epochs: 5
+step: [30, 60]
+
+# training
+device: [0]
+batch_size: 32
+test_batch_size: 32
+num_epoch: 80
+eval_interval: 1
+label_smoothing: 0.1
