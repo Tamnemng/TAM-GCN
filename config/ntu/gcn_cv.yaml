@@ -35,8 +35,8 @@ nesterov: true
 
 # training
 device: [0]
-batch_size: 32                # GPU local — goc la 512
-test_batch_size: 64
-num_worker: 4                 # Windows — goc la 48
+batch_size: 128               # A100 40GB
+test_batch_size: 256
+num_worker: 8                 # Colab A100
 num_epoch: 65
-eval_interval: 5
+eval_interval: 1
