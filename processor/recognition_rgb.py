@@ -114,7 +114,7 @@ class REC_Processor(Processor):
             self.epoch = epoch
             self.train()
             
-            if epoch % self.arg.eval_interval == 0:
+            if epoch >= 5 and epoch % self.arg.eval_interval == 0:
                 self.test()
                 # GỌI HÀM LƯU MODEL TẠI ĐÂY
                 # save_model sẽ tự động lưu vào thư mục work_dir được định nghĩa trong file yaml
