@@ -3,50 +3,43 @@ ResNet + CTR-GCN On-The-Fly V12
 ================================
 Fix 3 fundamental issues of V11:
 
-  1. SPATIAL FALLACY FIX → Gaussian Heatmaps from actual joint (x,y) coordinates
-     V11 used ConvTranspose2d to upsample [BodyPart x Time] 5x5 matrix to 28x28,
-     treating Part and Time axes as spatial Height and Width — mathematically nonsensical.
-     V12 extracts real (x,y) joint coordinates from skeleton input, groups them into
-     5 body parts, and generates Gaussian heatmaps directly on the 28x28 feature map.
-     Attention is now ANCHORED to actual body positions.
+  1. SPATIAL FALLACY FIX → Heatmap-Guided Feature Scatter + Cross-Attention
+     V11 used ConvTranspose2d to upsample [BodyPart x Time] 5x5 → 28x28,
+     treating Part and Time axes as spatial H×W — no spatial grounding.
 
-  2. OVER-SHARPENING FIX → Multi-Scale Attention (Sharp + Coarse branches)
-     V11 used a single learnable temperature to sharpen sigmoid, causing "local blindness"
-     for whole-body actions like 'Sit down' (collapsed from 76.6% to 12.8% under noise).
-     V12 uses TWO attention branches:
-       - Sharp branch (small sigma): focuses on local body parts (good for hand gestures)
-       - Coarse branch (large sigma): covers whole body (good for sit down, stand up)
-     A per-sample gate learns to mix the two scales based on the action's spatial extent.
+     V12 uses TWO complementary pathways (no ConvTranspose2d):
+
+     PATH A — Heatmap-Guided Feature Scatter:
+       Extract (x,y) joint coords → Gaussian heatmaps at body part positions.
+       Extract per-part CTR-GCN features → scatter onto 28x28 via heatmaps.
+       Result: CTR-GCN features placed at their actual spatial positions.
+       Formula: spatial[c,h,w] = Σ_p (part_feat[c,p] × heatmap[p,h,w])
+
+     PATH B — Cross-Attention (coordinate-free fallback):
+       For each pixel in RGB, compute attention to 5 skeleton parts.
+       This naturally aligns skeleton info with RGB spatial structure
+       WITHOUT needing coordinates — robust to coordinate misalignment
+       caused by random 3D rotation augmentation during training.
+
+  2. OVER-SHARPENING FIX → Multi-Scale Scatter (Sharp + Coarse)
+     V11's single temperature sigmoid caused "local blindness" for whole-body
+     actions ('Sit down': 76.6% → 12.8% under noise).
+     V12 scatters features at TWO scales:
+       - Sharp (σ≈2): tight blobs for local actions (pick up, wave)
+       - Coarse (σ≈6): wide blobs for whole-body actions (sit down, stand up)
+     Single spatial network sees both scales → learns which to use per-pixel.
 
   3. BLIND CONFIDENCE FIX → Uncertainty-Aware Confidence Gate
-     V11's MLP gate had no way to detect skeleton noise at inference (garbage in → garbage out).
-     V12 computes temporal jitter (acceleration variance) from raw skeleton coordinates
-     as a direct skeleton quality signal. High jitter = noisy/unreliable skeleton.
-     This uncertainty score is fed into the confidence gate MLP alongside skeleton and
-     RGB features, giving the gate explicit evidence to reduce α when skeleton is bad.
-
-Architecture overview:
-  Skeleton input (B, 3, T, V, M)
-    ├→ CTR-GCN → features → skel_grid (B, K, 5, 5) → channel attention
-    ├→ Raw (x,y) coords → body part positions → Gaussian Heatmaps on 28x28
-    └→ Temporal jitter → uncertainty scores → confidence gate
-
-  RGB input → ResNet stem → layer1 → layer2 → (B, 512, 28, 28)
-
-  Cross-Modal Fusion:
-    1. Channel attention from skel_grid (same as V11)
-    2. Gaussian heatmaps at actual body positions (replaces ConvTranspose2d)
-    3. Multi-scale spatial attention: sharp (local) + coarse (global)
-    4. Confidence gate with skeleton uncertainty
-    5. Residual fusion: output = rgb + α * skeleton_delta
+     V11's MLP had no evidence of skeleton quality at inference.
+     V12 computes temporal jitter (acceleration variance) from raw skeleton.
+     High jitter = noisy skeleton → confidence gate pushes α → 0 → RGB fallback.
 
 Comparison:
-  V0:  Fixed L2, pick 1 joint, bilinear, no gate.
-  V2:  Conv1d(256→1), skel_grid (B,1,5,5), 7x7+Sigmoid.
-  V9:  Conv1d(256→K), skel_grid (B,K,5,5), ConvTranspose2d, deep+TempSigmoid, spatial gate.
-  V11: V9 + confidence-gated fusion (ConvTranspose2d spatial fallacy, single-scale, blind gate).
-  V12: Gaussian heatmaps + multi-scale attention + uncertainty-aware confidence gate.
+  V9:  Conv1d(256→K), skel_grid (B,K,5,5), ConvTranspose2d, TempSigmoid, spatial gate.
+  V11: V9 + confidence-gated fusion (still ConvTranspose2d, single-scale, blind gate).
+  V12: Feature scatter + cross-attention + multi-scale + uncertainty-aware gate.
 """
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -54,21 +47,25 @@ import torchvision.models as models
 
 
 class CrossModalAttentionV12(nn.Module):
-    """Cross-Modal Attention V12: Gaussian Heatmaps + Multi-Scale + Uncertainty Gate.
+    """Cross-Modal Attention V12: Feature Scatter + Cross-Attention + Multi-Scale.
 
-    Key differences from V11:
-      1. No ConvTranspose2d — uses Gaussian heatmaps from real joint coordinates
-      2. Two spatial attention branches (sharp + coarse) with per-sample mixing
-      3. Confidence gate receives skeleton uncertainty (temporal jitter) as input
+    Two spatial pathways (no ConvTranspose2d):
+      A. Heatmap scatter: places CTR-GCN features at coordinate positions
+      B. Cross-attention: aligns skeleton features with RGB (coordinate-free)
+    Both feed into a single spatial attention network.
     """
     def __init__(self, rgb_channels, skel_channels=8, skel_grid_size=200,
-                 reduction=4, num_parts=5, init_sigma_sharp=2.0, init_sigma_coarse=6.0):
+                 reduction=4, num_parts=5, sp_feat_channels=4,
+                 init_sigma_sharp=2.0, init_sigma_coarse=6.0,
+                 cross_attn_dim=16):
         super().__init__()
 
         self.num_parts = num_parts
+        self.sp_feat_channels = sp_feat_channels
+        self.cross_attn_dim = cross_attn_dim
 
         # ============================================================
-        # 1. CHANNEL ATTENTION (from V11/V9 — operates in feature space, no spatial issue)
+        # 1. CHANNEL ATTENTION (from V11 — operates in feature space, no spatial issue)
         # ============================================================
         self.channel_attn = nn.Sequential(
             nn.Linear(skel_grid_size, rgb_channels // reduction, bias=False),
@@ -78,22 +75,46 @@ class CrossModalAttentionV12(nn.Module):
         )
 
         # ============================================================
-        # 2. GAUSSIAN HEATMAP PARAMETERS (replaces ConvTranspose2d)
+        # 2. HEATMAP-GUIDED FEATURE SCATTER (replaces ConvTranspose2d)
         # ============================================================
-        # Learnable sigma controls the spread of Gaussian blobs
-        # Sharp: small sigma → focused attention on specific body parts
-        # Coarse: large sigma → broad attention covering whole body
+        # Project per-part features from K channels → sp_feat_channels
+        self.part_feat_proj = nn.Sequential(
+            nn.Conv1d(skel_channels, sp_feat_channels, kernel_size=1, bias=False),
+            nn.BatchNorm1d(sp_feat_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        # Learnable coordinate adjustment (residual, initialized to identity)
+        # Allows model to learn alignment between skeleton and image coordinates
+        self.coord_adjust = nn.Sequential(
+            nn.Linear(2, 16),
+            nn.ReLU(inplace=True),
+            nn.Linear(16, 2),
+        )
+        nn.init.zeros_(self.coord_adjust[-1].weight)
+        nn.init.zeros_(self.coord_adjust[-1].bias)
+
+        # Learnable sigma for multi-scale Gaussians
         self.log_sigma_sharp = nn.Parameter(torch.tensor(init_sigma_sharp).log())
         self.log_sigma_coarse = nn.Parameter(torch.tensor(init_sigma_coarse).log())
 
         # ============================================================
-        # 3. MULTI-SCALE SPATIAL ATTENTION
+        # 3. CROSS-ATTENTION (coordinate-free spatial alignment)
         # ============================================================
-        # Each branch: concat(rgb_max, rgb_avg, heatmaps) → conv → logits
-        sp_input_channels = 2 + num_parts  # rgb_max + rgb_avg + 5 part heatmaps = 7
+        # Q from RGB positions, K/V from skeleton parts
+        # Lightweight: just 3 linear projections + matmul
+        self.rgb_query_proj = nn.Conv2d(rgb_channels, cross_attn_dim, 1, bias=False)
+        self.skel_key_proj = nn.Linear(skel_channels, cross_attn_dim, bias=False)
+        self.skel_val_proj = nn.Linear(skel_channels, sp_feat_channels, bias=False)
+
+        # ============================================================
+        # 4. SINGLE SPATIAL ATTENTION NETWORK (multi-scale input)
+        # ============================================================
+        # Input channels: rgb_max(1) + rgb_avg(1) + scatter_sharp(C_sp) +
+        #                 scatter_coarse(C_sp) + cross_attn(C_sp) = 2 + 3*C_sp
+        sp_input_channels = 2 + 3 * sp_feat_channels
         sp_hidden = 8
-
-        self.spatial_net_sharp = nn.Sequential(
+        self.spatial_net = nn.Sequential(
             nn.Conv2d(sp_input_channels, sp_hidden, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(sp_hidden),
             nn.ReLU(inplace=True),
@@ -103,33 +124,9 @@ class CrossModalAttentionV12(nn.Module):
             nn.Conv2d(sp_hidden, 1, kernel_size=1, bias=True),
         )
 
-        self.spatial_net_coarse = nn.Sequential(
-            nn.Conv2d(sp_input_channels, sp_hidden, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(sp_hidden),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(sp_hidden, sp_hidden, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(sp_hidden),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(sp_hidden, 1, kernel_size=1, bias=True),
-        )
-
-        # Per-sample scale mixing gate: learns when to use sharp vs coarse
-        # Input: skel_flat — skeleton dynamics tell us if action is local or global
-        self.scale_gate = nn.Sequential(
-            nn.Linear(skel_grid_size, 32, bias=True),
-            nn.ReLU(inplace=True),
-            nn.Linear(32, 2, bias=True),
-            # Output: 2 logits → softmax to get (w_sharp, w_coarse)
-        )
-        # Initialize to equal mixing (both logits = 0 → softmax = [0.5, 0.5])
-        nn.init.zeros_(self.scale_gate[-1].weight)
-        nn.init.zeros_(self.scale_gate[-1].bias)
-
         # ============================================================
-        # 4. UNCERTAINTY-AWARE CONFIDENCE GATE
+        # 5. UNCERTAINTY-AWARE CONFIDENCE GATE
         # ============================================================
-        # Input: skel_flat (K*25) + rgb_global (512) + uncertainty (num_parts)
-        # The uncertainty signal gives the gate DIRECT evidence of skeleton quality
         confidence_input_dim = skel_grid_size + rgb_channels + num_parts
         confidence_hidden = 64
         self.confidence_gate = nn.Sequential(
@@ -139,7 +136,6 @@ class CrossModalAttentionV12(nn.Module):
             nn.Linear(confidence_hidden, 1, bias=True),
             nn.Sigmoid(),
         )
-        # Initialize to trust skeleton by default: sigmoid(1.73) ≈ 0.85
         nn.init.constant_(self.confidence_gate[-2].bias, 1.73)
         nn.init.xavier_uniform_(self.confidence_gate[-2].weight, gain=0.1)
         nn.init.xavier_uniform_(self.confidence_gate[0].weight, gain=0.5)
@@ -159,29 +155,25 @@ class CrossModalAttentionV12(nn.Module):
         B, P, _ = part_coords.shape
         device = part_coords.device
 
-        # Map from [-1, 1] to [0, H-1] and [0, W-1]
         cx = (part_coords[:, :, 0] + 1) / 2 * (W - 1)   # (B, P)
         cy = (part_coords[:, :, 1] + 1) / 2 * (H - 1)   # (B, P)
 
-        # Create coordinate grids — efficient broadcasting
         yy = torch.arange(H, device=device, dtype=torch.float32).view(1, 1, H, 1)
         xx = torch.arange(W, device=device, dtype=torch.float32).view(1, 1, 1, W)
 
         cx = cx.view(B, P, 1, 1)
         cy = cy.view(B, P, 1, 1)
 
-        # 2D Gaussian: exp(-((x-cx)^2 + (y-cy)^2) / (2*sigma^2))
         heatmaps = torch.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma ** 2))
-
-        return heatmaps  # (B, P, H, W)
+        return heatmaps
 
     def forward(self, rgb_feat, skel_grid, part_coords, uncertainty, exp_type='normal'):
         """
         Args:
             rgb_feat: (B, C, H, W) — ResNet layer2 features
-            skel_grid: (B, K, 5, 5) — CTR-GCN projected skeleton grid
+            skel_grid: (B, K, 5, T_frames) — CTR-GCN projected skeleton grid
             part_coords: (B, 5, 2) — body part (x, y) centers in [-1, 1]
-            uncertainty: (B, 5) — per-part temporal jitter (skeleton quality signal)
+            uncertainty: (B, 5) — per-part temporal jitter
             exp_type: ablation experiment type
 
         Returns:
@@ -190,10 +182,8 @@ class CrossModalAttentionV12(nn.Module):
         """
         B, C, H, W = rgb_feat.shape
 
-        # ABLATION experiments
         if exp_type == 'noise':
             skel_grid = torch.randn_like(skel_grid)
-            # Also randomize part coords and uncertainty
             part_coords = torch.rand_like(part_coords) * 2 - 1
             uncertainty = torch.rand_like(uncertainty)
         elif exp_type == 'ones':
@@ -204,82 +194,100 @@ class CrossModalAttentionV12(nn.Module):
         skel_flat = skel_grid.view(B, -1)  # (B, K*25)
 
         # ---- CONFIDENCE GATE with uncertainty ----
-        rgb_global = F.adaptive_avg_pool2d(rgb_feat, 1).view(B, -1)  # (B, C)
-        # Normalize uncertainty to [0, 1] range per-sample for stable MLP input
+        rgb_global = F.adaptive_avg_pool2d(rgb_feat, 1).view(B, -1)
         unc_norm = uncertainty / (uncertainty.max(dim=1, keepdim=True)[0] + 1e-8)
         confidence_input = torch.cat([skel_flat, rgb_global, unc_norm], dim=1)
-        confidence = self.confidence_gate(confidence_input)  # (B, 1)
+        confidence = self.confidence_gate(confidence_input)
 
-        # ---- CHANNEL ATTENTION (from skel_grid features) ----
-        ch_attn = self.channel_attn(skel_flat)                     # (B, C)
-        ch_attn = ch_attn.unsqueeze(-1).unsqueeze(-1)              # (B, C, 1, 1)
-        feat_ca = rgb_feat * ch_attn                               # (B, C, H, W)
+        # ---- CHANNEL ATTENTION ----
+        ch_attn = self.channel_attn(skel_flat)
+        ch_attn = ch_attn.unsqueeze(-1).unsqueeze(-1)
+        feat_ca = rgb_feat * ch_attn
 
         if exp_type == 'no_spatial':
-            # Ablation: skip spatial attention
             alpha = confidence.unsqueeze(-1).unsqueeze(-1)
             return rgb_feat + alpha * feat_ca, confidence
 
-        # ---- GAUSSIAN HEATMAPS at actual body positions ----
+        # ---- PATH A: HEATMAP-GUIDED FEATURE SCATTER ----
+        # Extract per-part features by averaging over time dimension
+        skel_parts = skel_grid.mean(dim=3)                        # (B, K, 5)
+        skel_parts_proj = self.part_feat_proj(skel_parts)          # (B, C_sp, 5)
+
+        # Adjust coordinates with learned residual
+        adj_coords = part_coords + self.coord_adjust(part_coords)  # (B, 5, 2)
+        adj_coords = adj_coords.clamp(-1, 1)
+
+        # Multi-scale Gaussian heatmaps
         sigma_sharp = self.log_sigma_sharp.exp()
         sigma_coarse = self.log_sigma_coarse.exp()
+        hm_sharp = self._generate_gaussian_heatmaps(adj_coords, H, W, sigma_sharp)
+        hm_coarse = self._generate_gaussian_heatmaps(adj_coords, H, W, sigma_coarse)
 
-        heatmaps_sharp = self._generate_gaussian_heatmaps(
-            part_coords, H, W, sigma_sharp)      # (B, 5, H, W)
-        heatmaps_coarse = self._generate_gaussian_heatmaps(
-            part_coords, H, W, sigma_coarse)      # (B, 5, H, W)
+        # Scatter: place CTR-GCN part features at spatial positions via heatmaps
+        # skel_parts_proj[b,c,p] * heatmap[b,p,h,w] → sum over parts → spatial[b,c,h,w]
+        scatter_sharp = torch.einsum('bcp,bphw->bchw', skel_parts_proj, hm_sharp)
+        scatter_coarse = torch.einsum('bcp,bphw->bchw', skel_parts_proj, hm_coarse)
 
-        # RGB spatial cues
-        rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]      # (B, 1, H, W)
-        rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)         # (B, 1, H, W)
+        # ---- PATH B: CROSS-ATTENTION (coordinate-free) ----
+        # Q from RGB: each pixel asks "which skeleton part is relevant here?"
+        rgb_q = self.rgb_query_proj(feat_ca)                       # (B, d, H, W)
+        rgb_q = rgb_q.view(B, self.cross_attn_dim, -1).permute(0, 2, 1)  # (B, H*W, d)
 
-        # ---- MULTI-SCALE SPATIAL ATTENTION ----
-        # Sharp branch: local attention for fine-grained actions
-        sp_input_sharp = torch.cat([rgb_max, rgb_avg, heatmaps_sharp], dim=1)
-        logits_sharp = self.spatial_net_sharp(sp_input_sharp)       # (B, 1, H, W)
-        attn_sharp = torch.sigmoid(logits_sharp)                    # (B, 1, H, W)
+        # K,V from skeleton parts: (B, K, 5) → (B, 5, K) → project
+        skel_parts_t = skel_parts.permute(0, 2, 1)                # (B, 5, K)
+        skel_k = self.skel_key_proj(skel_parts_t)                  # (B, 5, d)
+        skel_v = self.skel_val_proj(skel_parts_t)                  # (B, 5, C_sp)
 
-        # Coarse branch: global attention for whole-body actions
-        sp_input_coarse = torch.cat([rgb_max, rgb_avg, heatmaps_coarse], dim=1)
-        logits_coarse = self.spatial_net_coarse(sp_input_coarse)    # (B, 1, H, W)
-        attn_coarse = torch.sigmoid(logits_coarse)                  # (B, 1, H, W)
+        # Attention: (B, H*W, d) @ (B, d, 5) → (B, H*W, 5)
+        attn_logits = torch.bmm(rgb_q, skel_k.permute(0, 2, 1))
+        attn_logits = attn_logits / math.sqrt(self.cross_attn_dim)
+        attn_weights = F.softmax(attn_logits, dim=2)               # (B, H*W, 5)
 
-        # Per-sample scale mixing: skeleton dynamics determine sharp vs coarse
-        scale_logits = self.scale_gate(skel_flat)                   # (B, 2)
-        scale_weights = F.softmax(scale_logits, dim=1)              # (B, 2)
-        w_sharp = scale_weights[:, 0:1].unsqueeze(-1).unsqueeze(-1)  # (B, 1, 1, 1)
-        w_coarse = scale_weights[:, 1:2].unsqueeze(-1).unsqueeze(-1) # (B, 1, 1, 1)
+        # Aggregate: (B, H*W, 5) @ (B, 5, C_sp) → (B, H*W, C_sp)
+        cross_out = torch.bmm(attn_weights, skel_v)
+        cross_out = cross_out.permute(0, 2, 1).view(B, self.sp_feat_channels, H, W)
 
-        sp_attn = w_sharp * attn_sharp + w_coarse * attn_coarse     # (B, 1, H, W)
+        # ---- SPATIAL ATTENTION (single network, multi-scale input) ----
+        rgb_max = torch.max(feat_ca, dim=1, keepdim=True)[0]
+        rgb_avg = torch.mean(feat_ca, dim=1, keepdim=True)
 
-        # ---- SPATIAL-MODULATED FUSION ----
-        skel_delta = feat_ca * sp_attn                              # (B, C, H, W)
+        sp_input = torch.cat([
+            rgb_max, rgb_avg,        # (B, 2, H, W) — RGB spatial cues
+            scatter_sharp,            # (B, C_sp, H, W) — features at sharp positions
+            scatter_coarse,           # (B, C_sp, H, W) — features at coarse positions
+            cross_out,                # (B, C_sp, H, W) — coordinate-free features
+        ], dim=1)                     # (B, 2 + 3*C_sp, H, W)
 
-        # ---- CONFIDENCE-GATED OUTPUT ----
-        alpha = confidence.unsqueeze(-1).unsqueeze(-1)              # (B, 1, 1, 1)
-        output_feat = rgb_feat + alpha * skel_delta                 # (B, C, H, W)
+        sp_attn = torch.sigmoid(self.spatial_net(sp_input))        # (B, 1, H, W)
+
+        # ---- FUSION ----
+        skel_delta = feat_ca * sp_attn
+        alpha = confidence.unsqueeze(-1).unsqueeze(-1)
+        output_feat = rgb_feat + alpha * skel_delta
 
         return output_feat, confidence
 
 
 class Model(nn.Module):
-    """V12: Gaussian Heatmaps + Multi-Scale Attention + Uncertainty-Aware Confidence Gate.
+    """V12: Feature Scatter + Cross-Attention + Multi-Scale + Uncertainty Gate.
 
     Architecture:
-      1. skel_proj: Conv1d(256→K) preserves K channels (from V9/V11)
+      1. skel_proj: Conv1d(256→K) — preserves K channels (from V9/V11)
       2. joint_to_part: Conv1d(20→5) per K-channel (from V9/V11)
-      3. skel_grid: (B, K, 5, 5) multi-channel (for channel attention only)
-      4. NEW: Gaussian heatmaps from raw (x,y) coordinates (replaces ConvTranspose2d)
-      5. NEW: Multi-scale spatial attention — sharp + coarse branches
-      6. NEW: Uncertainty-aware confidence gate — temporal jitter as quality signal
-      7. Consistency loss (from V11) — explicitly trains gate
+      3. skel_grid: (B, K, 5, 5) — for channel attention + per-part features
+      4. NEW: Heatmap scatter — places CTR-GCN features at coordinate positions
+      5. NEW: Cross-attention — coordinate-free RGB↔skeleton alignment
+      6. NEW: Multi-scale scatter (sharp + coarse) in single spatial network
+      7. NEW: Uncertainty-aware confidence gate
+      8. Consistency loss (from V11)
 
     Training losses:
       L_total = L_CE(fused_output, label) + λ * L_consistency
     """
     def __init__(self, num_class, pretrained=True, temporal_rgb_frames=5,
-                 exp_type='normal', proj_channels=8, init_sigma_sharp=2.0,
-                 init_sigma_coarse=6.0, consistency_weight=0.1,
+                 exp_type='normal', proj_channels=8, sp_feat_channels=4,
+                 init_sigma_sharp=2.0, init_sigma_coarse=6.0,
+                 cross_attn_dim=16, consistency_weight=0.1,
                  num_point=20, num_person=1):
         super(Model, self).__init__()
 
@@ -292,22 +300,22 @@ class Model(nn.Module):
         self.num_person = num_person
         self.num_point = num_point
 
-        # ---- Body part groups (for coordinate extraction and joint-to-part) ----
-        if num_point == 25:  # NTU RGB+D
+        # ---- Body part groups ----
+        if num_point == 25:
             self.part_groups = [
-                [0, 1, 2, 3, 20],           # Head/Torso/Spine
-                [4, 5, 6, 7, 21, 22],       # Left arm + hand tips
-                [8, 9, 10, 11, 23, 24],     # Right arm + hand tips
-                [12, 13, 14, 15],           # Left leg
-                [16, 17, 18, 19],           # Right leg
+                [0, 1, 2, 3, 20],
+                [4, 5, 6, 7, 21, 22],
+                [8, 9, 10, 11, 23, 24],
+                [12, 13, 14, 15],
+                [16, 17, 18, 19],
             ]
-        else:  # NW-UCLA (20 joints)
+        else:
             self.part_groups = [
-                [0, 1, 2, 3],       # Head/Torso
-                [4, 5, 6, 7],       # Left arm
-                [8, 9, 10, 11],     # Right arm
-                [12, 13, 14, 15],   # Left leg
-                [16, 17, 18, 19],   # Right leg
+                [0, 1, 2, 3],
+                [4, 5, 6, 7],
+                [8, 9, 10, 11],
+                [12, 13, 14, 15],
+                [16, 17, 18, 19],
             ]
 
         # ---- ResNet-50 backbone ----
@@ -322,7 +330,7 @@ class Model(nn.Module):
         self.avgpool = resnet.avgpool
         self.fc = nn.Linear(resnet.fc.in_features, num_class)
 
-        # ---- RGB-ONLY auxiliary head (for consistency loss, same as V11) ----
+        # ---- RGB-ONLY auxiliary head (for consistency loss) ----
         self.rgb_only_head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
@@ -330,7 +338,7 @@ class Model(nn.Module):
             nn.Linear(512, num_class),
         )
 
-        # ---- Single-stage projection preserving K channels (from V9/V11) ----
+        # ---- Skeleton projection (from V9/V11) ----
         gcn_channels = 256
         K = proj_channels
         self.skel_proj = nn.Sequential(
@@ -351,21 +359,21 @@ class Model(nn.Module):
                 for j in group:
                     self.joint_to_part[0].weight[i, j, 0] = 1.0 / len(group)
 
-        # ---- V12: Cross-modal attention with Gaussian heatmaps ----
+        # ---- V12: Cross-modal attention ----
         self.cross_attn = CrossModalAttentionV12(
             rgb_channels=512,
             skel_channels=K,
-            skel_grid_size=K * 5 * temporal_rgb_frames,   # K*25
+            skel_grid_size=K * 5 * temporal_rgb_frames,
             reduction=4,
             num_parts=5,
+            sp_feat_channels=sp_feat_channels,
             init_sigma_sharp=init_sigma_sharp,
             init_sigma_coarse=init_sigma_coarse,
+            cross_attn_dim=cross_attn_dim,
         )
 
     def _build_skel_grid(self, feature_s):
-        """Single-stage projection → per-channel joint-to-part → temporal pool.
-        Same as V11 — used for channel attention (feature-space, not spatial).
-        """
+        """Single-stage projection → per-channel joint-to-part → temporal pool."""
         B, C, T_new, V, M = feature_s.shape
         K = self.proj_channels
         T_frames = self.temporal_rgb_frames
@@ -392,79 +400,55 @@ class Model(nn.Module):
 
         Args:
             x_s: (B, 3, T, V, M) — raw skeleton coordinates in [-1, 1]
-
         Returns:
-            part_coords: (B, 5, 2) — (x, y) center of each body part, in [-1, 1]
+            part_coords: (B, 5, 2)
         """
         B = x_s.shape[0]
 
-        # Take (x, y) coordinates, ignore z
         if x_s.shape[4] > 1:
-            coords = x_s[:, :2, :, :, :].mean(dim=4)  # (B, 2, T, V)
+            coords = x_s[:, :2, :, :, :].mean(dim=4)
         else:
-            coords = x_s[:, :2, :, :, 0]               # (B, 2, T, V)
+            coords = x_s[:, :2, :, :, 0]
 
-        # Average across time for stable position estimates
-        coords = coords.mean(dim=2)                     # (B, 2, V)
+        coords = coords.mean(dim=2)
 
-        # Group by body parts → compute center of each part
         part_coords = []
         for group in self.part_groups:
-            part_center = coords[:, :, group].mean(dim=2)  # (B, 2)
+            part_center = coords[:, :, group].mean(dim=2)
             part_coords.append(part_center)
-        part_coords = torch.stack(part_coords, dim=1)      # (B, 5, 2)
+        part_coords = torch.stack(part_coords, dim=1)
 
         return part_coords
 
     def _compute_skeleton_uncertainty(self, x_s):
-        """Compute temporal jitter as skeleton quality proxy.
-
-        Jitter = mean squared acceleration of joints.
-        High jitter means the skeleton detector was noisy/unstable.
-        This gives the confidence gate DIRECT evidence of skeleton quality,
-        unlike V11 which had no way to detect noise at inference.
+        """Compute temporal jitter (acceleration variance) as skeleton quality proxy.
 
         Args:
-            x_s: (B, 3, T, V, M) — raw skeleton coordinates
-
+            x_s: (B, 3, T, V, M)
         Returns:
-            uncertainty: (B, 5) — per-body-part jitter scores
+            uncertainty: (B, 5)
         """
         B = x_s.shape[0]
 
         if x_s.shape[4] > 1:
-            coords = x_s[:, :2, :, :, :].mean(dim=4)  # (B, 2, T, V)
+            coords = x_s[:, :2, :, :, :].mean(dim=4)
         else:
-            coords = x_s[:, :2, :, :, 0]               # (B, 2, T, V)
+            coords = x_s[:, :2, :, :, 0]
 
-        # Velocity: 1st derivative of position
-        velocity = coords[:, :, 1:, :] - coords[:, :, :-1, :]    # (B, 2, T-1, V)
+        velocity = coords[:, :, 1:, :] - coords[:, :, :-1, :]
+        accel = velocity[:, :, 1:, :] - velocity[:, :, :-1, :]
+        jitter = accel.pow(2).sum(dim=1).mean(dim=1)
 
-        # Acceleration: 2nd derivative — measures jitter/instability
-        accel = velocity[:, :, 1:, :] - velocity[:, :, :-1, :]   # (B, 2, T-2, V)
-
-        # Per-joint jitter: mean squared acceleration over time
-        jitter = accel.pow(2).sum(dim=1).mean(dim=1)              # (B, V)
-
-        # Group by body parts
         uncertainty = []
         for group in self.part_groups:
-            part_jitter = jitter[:, group].mean(dim=1, keepdim=True)  # (B, 1)
+            part_jitter = jitter[:, group].mean(dim=1, keepdim=True)
             uncertainty.append(part_jitter)
-        uncertainty = torch.cat(uncertainty, dim=1)                    # (B, 5)
+        uncertainty = torch.cat(uncertainty, dim=1)
 
         return uncertainty
 
     def compute_consistency_loss(self, confidence, fused_logits, rgb_only_logits, labels):
-        """Consistency loss: teach the confidence gate when to trust skeleton.
-        Same as V11 — the uncertainty input to the gate makes this even more effective.
-
-        Cases:
-          1. Fused CORRECT → target = 1.0 (trust skeleton)
-          2. Fused WRONG but RGB-only CORRECT → target = 0.0 (skeleton HURT)
-          3. Both WRONG → target = 0.5 (neutral)
-          4. Both CORRECT → target = 0.9 (mildly trust skeleton)
-        """
+        """Consistency loss: teach the confidence gate when to trust skeleton."""
         with torch.no_grad():
             fused_preds = fused_logits.argmax(dim=1)
             rgb_preds = rgb_only_logits.argmax(dim=1)
@@ -494,49 +478,36 @@ class Model(nn.Module):
     def forward(self, x_s, x_rgb, labels=None):
         """
         Args:
-            x_s: skeleton data (B, C, T, V, M) — raw coordinates in [-1, 1]
+            x_s: skeleton data (B, 3, T, V, M)
             x_rgb: RGB frames (B, 3, 224, 224)
-            labels: ground truth labels (B,) — only needed during training
-
-        Returns:
-            if training and labels provided:
-                (output, consistency_loss)
-            else:
-                output: (B, num_class) classification logits
+            labels: ground truth labels (B,) — training only
         """
-        # ---- Extract raw skeleton info BEFORE CTR-GCN ----
         with torch.no_grad():
-            part_coords = self._extract_part_coords(x_s)           # (B, 5, 2)
-            uncertainty = self._compute_skeleton_uncertainty(x_s)   # (B, 5)
+            part_coords = self._extract_part_coords(x_s)
+            uncertainty = self._compute_skeleton_uncertainty(x_s)
 
-        # ---- CTR-GCN feature extraction (frozen) ----
         with torch.no_grad():
             _, feature_s = self.ctrgcn.extract_feature(x_s)
 
-        skel_grid = self._build_skel_grid(feature_s.detach())      # (B, K, 5, 5)
+        skel_grid = self._build_skel_grid(feature_s.detach())
 
-        # ---- ResNet backbone: stem → layer1 → layer2 ----
         x = self.stem(x_rgb)
         x = self.layer1(x)
-        x = self.layer2(x)                                         # (B, 512, 28, 28)
+        x = self.layer2(x)
 
-        # ---- RGB-ONLY auxiliary prediction (for consistency loss) ----
         if self.training:
             rgb_only_logits = self.rgb_only_head(x.detach())
 
-        # ---- V12: Cross-modal attention with Gaussian heatmaps ----
         x_fused, confidence = self.cross_attn(
             x, skel_grid, part_coords, uncertainty, exp_type=self.exp_type
         )
 
-        # ---- Continue ResNet backbone ----
         x_fused = self.layer3(x_fused)
         x_fused = self.layer4(x_fused)
         x_fused = self.avgpool(x_fused)
         x_fused = torch.flatten(x_fused, 1)
         output = self.fc(x_fused)
 
-        # ---- Consistency loss (training only) ----
         if self.training and labels is not None:
             consistency_loss = self.compute_consistency_loss(
                 confidence, output, rgb_only_logits, labels

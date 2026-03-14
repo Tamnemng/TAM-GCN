@@ -20,15 +20,17 @@ test_feeder_args:
   rgb_path: C:/Users/nguyn/Downloads/ucla_fivefs-20260302T172922Z-1-001/ucla_fivefs/
   temporal_rgb_frames: 5
 
-# model — V12: Gaussian Heatmaps + Multi-Scale Attention + Uncertainty-Aware Confidence Gate
+# model — V12: Feature Scatter + Cross-Attention + Multi-Scale + Uncertainty Gate
 model: models.resnet_ctrgcn_ontheflyv12.Model
 model_args:
   resnet_args:
     num_class: 10
     pretrained: True
     consistency_weight: 0.1
+    sp_feat_channels: 4
     init_sigma_sharp: 2.0
     init_sigma_coarse: 6.0
+    cross_attn_dim: 16
   gcn_weights: ./result/nucla/CTROGC-GCN.pt
   gcn_args:
     num_class: 10
