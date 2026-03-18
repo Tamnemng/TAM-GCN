@@ -13,9 +13,11 @@ Matching strategy:
   - If npz was cleaned (some zero-samples removed), use greedy label matching
 """
 
+import io
 import os
 import glob
 import random
+import zipfile
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -51,6 +53,14 @@ class Feeder(Dataset):
         self.random_flip = random_flip
         self.is_train = 'train' in label_path
         self.debug = debug
+
+        # Support reading images directly from a zip file
+        self._zip_file = None
+        if rgb_path.endswith('.zip'):
+            self._zip_file = zipfile.ZipFile(rgb_path, 'r')
+            print(f"  RGB source: zip file ({rgb_path})")
+        else:
+            print(f"  RGB source: directory ({rgb_path})")
 
         # Load skeleton data from npz
         self._load_npz(npz_path)
@@ -91,7 +101,17 @@ class Feeder(Dataset):
 
     def _build_image_mapping(self):
         """Match ST-ROI images to skeleton samples by split + label ordering."""
-        all_pngs = sorted(glob.glob(os.path.join(self.rgb_path, '*.png')))
+        if self._zip_file is not None:
+            # List .png files inside the zip
+            all_pngs = sorted([
+                f for f in self._zip_file.namelist()
+                if f.lower().endswith('.png') and not f.startswith('__MACOSX')
+            ])
+            # Strip any leading directory prefix so basename logic below works
+            all_pngs = [f for f in all_pngs if os.path.basename(f)]
+        else:
+            all_pngs = sorted(glob.glob(os.path.join(self.rgb_path, '*.png')))
+
         if len(all_pngs) == 0:
             raise ValueError(f"No .png files found in {self.rgb_path}")
 
@@ -195,10 +215,14 @@ class Feeder(Dataset):
         skel = skel.transpose(3, 0, 2, 1)                   # (C, T, V, M) = (3, T, 25, 2)
         skel = skel.astype(np.float32)
 
-        # 2. Load ST-ROI image
+        # 2. Load ST-ROI image (from zip or directory)
         img_path = self.image_paths[index]
         try:
-            rgb = Image.open(img_path).convert('RGB')
+            if self._zip_file is not None:
+                with self._zip_file.open(img_path) as f:
+                    rgb = Image.open(io.BytesIO(f.read())).convert('RGB')
+            else:
+                rgb = Image.open(img_path).convert('RGB')
         except Exception:
             print(f"Error loading image: {img_path}")
             rgb = Image.new('RGB', (224, 224))

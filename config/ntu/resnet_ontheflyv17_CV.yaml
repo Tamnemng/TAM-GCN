@@ -4,7 +4,7 @@ work_dir: ./work_dir/ntu/resnet_ontheflyv17_CV
 feeder: feeder.feeder_ntu_fused_ctr_resnet.Feeder
 train_feeder_args:
   npz_path: G:/NTU60_CV_CLEAN.npz          # <-- SUA LAI DUONG DAN NPZ
-  rgb_path: G:/NTU_STROI/                  # <-- SUA LAI DUONG DAN CHUA STROI IMAGES
+  rgb_path: /content/drive/MyDrive/Data/ntu_rgbd_fivefs.zip
   label_path: train
   split: CV
   time_steps: 64
@@ -14,7 +14,7 @@ train_feeder_args:
 
 test_feeder_args:
   npz_path: G:/NTU60_CV_CLEAN.npz          # <-- SUA LAI DUONG DAN NPZ
-  rgb_path: G:/NTU_STROI/                  # <-- SUA LAI DUONG DAN CHUA STROI IMAGES
+  rgb_path: /content/drive/MyDrive/Data/ntu_rgbd_fivefs.zip
   label_path: val
   split: CV
   time_steps: 64
