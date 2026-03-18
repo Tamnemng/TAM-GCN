@@ -24,6 +24,16 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 
+# Per-process ZipFile cache: each DataLoader worker opens the zip once and reuses it.
+# Key = (pid, zip_path) so different zips or restarted workers get fresh handles.
+_ZIP_CACHE: dict = {}
+
+def _get_zip(zip_path: str) -> zipfile.ZipFile:
+    key = (os.getpid(), zip_path)
+    if key not in _ZIP_CACHE:
+        _ZIP_CACHE[key] = zipfile.ZipFile(zip_path, 'r')
+    return _ZIP_CACHE[key]
+
 
 # NTU-60 Cross-Subject split
 TRAIN_SUBJECTS_CS = [1, 2, 4, 5, 8, 9, 13, 14, 15, 16, 17, 18, 19, 25, 27, 28, 31, 34, 35, 38]
@@ -54,12 +64,17 @@ class Feeder(Dataset):
         self.is_train = 'train' in label_path
         self.debug = debug
 
-        # Support reading images directly from a zip file
-        self._zip_file = None
-        if rgb_path.endswith('.zip'):
-            self._zip_file = zipfile.ZipFile(rgb_path, 'r')
+        # Support reading images directly from a zip file.
+        # NOTE: ZipFile handle is NOT stored — it's opened per-call in __getitem__
+        # so DataLoader multi-process workers each get their own handle (no pickling issues).
+        self._is_zip = rgb_path.endswith('.zip')
+        if self._is_zip:
             print(f"  RGB source: zip file ({rgb_path})")
+            # Open once just to list contents for _build_image_mapping, then close
+            with zipfile.ZipFile(rgb_path, 'r') as zf:
+                self._zip_namelist = zf.namelist()
         else:
+            self._zip_namelist = None
             print(f"  RGB source: directory ({rgb_path})")
 
         # Load skeleton data from npz
@@ -101,14 +116,12 @@ class Feeder(Dataset):
 
     def _build_image_mapping(self):
         """Match ST-ROI images to skeleton samples by split + label ordering."""
-        if self._zip_file is not None:
-            # List .png files inside the zip
+        if self._is_zip:
             all_pngs = sorted([
-                f for f in self._zip_file.namelist()
+                f for f in self._zip_namelist
                 if f.lower().endswith('.png') and not f.startswith('__MACOSX')
+                   and os.path.basename(f)
             ])
-            # Strip any leading directory prefix so basename logic below works
-            all_pngs = [f for f in all_pngs if os.path.basename(f)]
         else:
             all_pngs = sorted(glob.glob(os.path.join(self.rgb_path, '*.png')))
 
@@ -218,8 +231,9 @@ class Feeder(Dataset):
         # 2. Load ST-ROI image (from zip or directory)
         img_path = self.image_paths[index]
         try:
-            if self._zip_file is not None:
-                with self._zip_file.open(img_path) as f:
+            if self._is_zip:
+                # _get_zip returns a per-process cached ZipFile handle
+                with _get_zip(self.rgb_path).open(img_path) as f:
                     rgb = Image.open(io.BytesIO(f.read())).convert('RGB')
             else:
                 rgb = Image.open(img_path).convert('RGB')
