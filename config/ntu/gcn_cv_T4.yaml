@@ -1,0 +1,42 @@
+work_dir: /kaggle/working/gcn_cv_T4
+
+# feeder — dùng --data_path khi chạy để override
+feeder: feeder.feeder_ntu_gcn.Feeder
+train_feeder_args:
+  data_path: /kaggle/input/ntu60/NTU60_CV_CLEAN.npz
+  split: train
+  debug: false
+  random_rot: true
+  p_interval: [0.5, 1]
+  window_size: 64
+
+test_feeder_args:
+  data_path: /kaggle/input/ntu60/NTU60_CV_CLEAN.npz
+  split: test
+  debug: false
+  p_interval: [0.95]
+  window_size: 64
+
+# model
+model: models.ctrgcn.Model
+model_args:
+  num_class: 60
+  num_point: 25
+  num_person: 2
+  graph: graph.ntu_rgb_d.Graph
+  graph_args:
+    labeling_mode: spatial
+
+# optim — lr scaled linearly: 0.1 * (64/128) = 0.05
+weight_decay: 0.0004
+base_lr: 0.05
+step: [35, 55]
+nesterov: true
+
+# training — T4 16GB (~14.56GB usable), batch 48 ~10.5GB
+device: [0]
+batch_size: 48
+test_batch_size: 96      # eval không cần gradient → gấp đôi
+num_worker: 2            # Kaggle T4
+num_epoch: 65
+eval_interval: 1
