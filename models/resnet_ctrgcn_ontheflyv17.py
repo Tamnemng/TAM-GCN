@@ -310,25 +310,42 @@ class Model(nn.Module):
 
     def _extract_part_coords(self, x_s):
         B, _, T, V, M = x_s.shape
-        c = x_s[:,:2,:,:,:].mean(dim=4) if M > 1 else x_s[:,:2,:,:,0]
+        c = x_s[:,:2,:,:,:].mean(dim=4) if M > 1 else x_s[:,:2,:,:,0]  # (B, 2, T, V)
+
+        # Per-sample normalize to [-1, 1] so this works for both:
+        #   NW-UCLA (feeder pre-normalizes) and NTU-60 (raw Kinect meters)
+        c_flat = c.reshape(B, 2, -1)
+        c_min  = c_flat.min(dim=2, keepdim=True)[0].unsqueeze(2)   # (B,2,1,1)
+        c_max  = c_flat.max(dim=2, keepdim=True)[0].unsqueeze(2)
+        c = 2.0 * (c - c_min) / (c_max - c_min + 1e-6) - 1.0     # -> [-1, 1]
+
         frames, result = [max(0,T//4), T//2, min(T-1,3*T//4)], []
         for t in frames:
             ct = c[:,:,t,:].clone()
-            ct[:,1,:] = -ct[:,1,:]  # Y-flip
+            ct[:,1,:] = -ct[:,1,:]  # Y-flip (Kinect Y-up -> image Y-down)
             result.append(torch.stack(
                 [ct[:,:,g].mean(dim=2) for g in self.part_groups], dim=1
             ))
         return torch.stack(result, dim=0).mean(dim=0)  # (B, 5, 2)
 
     def _compute_skeleton_uncertainty(self, x_s):
-        """Normalized jitter (B, 5) — proxy for skeleton detection quality."""
+        """Normalized jitter (B, 5) — proxy for skeleton detection quality.
+        Scale-invariant: works for both NW-UCLA (normalized) and NTU-60 (meters).
+        """
         B, _, T, V, M = x_s.shape
-        c     = x_s[:,:2,:,:,:].mean(dim=4) if M > 1 else x_s[:,:2,:,:,0]
-        vel   = c[:,:,1:,:] - c[:,:,:-1,:]
-        speed = vel.pow(2).sum(dim=1).sqrt()               # (B, T-1, V)
-        accel = vel[:,:,1:,:] - vel[:,:,:-1,:]
-        jitter     = accel.pow(2).sum(dim=1).mean(dim=1)  # (B, V)
-        mean_sp_sq = speed.mean(dim=1).pow(2)              # (B, V)
+        c = x_s[:,:2,:,:,:].mean(dim=4) if M > 1 else x_s[:,:2,:,:,0]  # (B,2,T,V)
+
+        # Normalize per-sample so jitter is scale-invariant across datasets
+        c_flat = c.reshape(B, 2, -1)
+        c_min  = c_flat.min(dim=2, keepdim=True)[0].unsqueeze(2)
+        c_max  = c_flat.max(dim=2, keepdim=True)[0].unsqueeze(2)
+        c = 2.0 * (c - c_min) / (c_max - c_min + 1e-6) - 1.0
+
+        vel        = c[:,:,1:,:] - c[:,:,:-1,:]
+        speed      = vel.pow(2).sum(dim=1).sqrt()           # (B, T-1, V)
+        accel      = vel[:,:,1:,:] - vel[:,:,:-1,:]
+        jitter     = accel.pow(2).sum(dim=1).mean(dim=1)   # (B, V)
+        mean_sp_sq = speed.mean(dim=1).pow(2)               # (B, V)
         norm_j     = jitter / (mean_sp_sq + 1e-4)
         return torch.cat(
             [norm_j[:,g].mean(dim=1, keepdim=True) for g in self.part_groups],
