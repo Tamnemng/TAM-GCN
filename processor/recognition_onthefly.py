@@ -29,6 +29,8 @@ class REC_Processor_OnTheFly(REC_Processor):
                             help='Experiment type for cross-attention ablation (normal, noise, ones, zeros, no_spatial)')
         parser.add_argument('--rgb_path', type=str, default=None,
                             help='Override the rgb_path defined in config for both train and test feeder args')
+        parser.add_argument('--npz_path', type=str, default=None,
+                            help='Override the npz_path defined in config for both train and test feeder args')
         return parser
 
     def load_model(self):
@@ -66,6 +68,13 @@ class REC_Processor_OnTheFly(REC_Processor):
                 self.arg.train_feeder_args['rgb_path'] = self.arg.rgb_path
             if hasattr(self.arg, 'test_feeder_args') and isinstance(self.arg.test_feeder_args, dict):
                 self.arg.test_feeder_args['rgb_path'] = self.arg.rgb_path
+
+        # Override npz_path if provided via CLI
+        if getattr(self.arg, 'npz_path', None) is not None:
+            if hasattr(self.arg, 'train_feeder_args') and isinstance(self.arg.train_feeder_args, dict):
+                self.arg.train_feeder_args['npz_path'] = self.arg.npz_path
+            if hasattr(self.arg, 'test_feeder_args') and isinstance(self.arg.test_feeder_args, dict):
+                self.arg.test_feeder_args['npz_path'] = self.arg.npz_path
         
         # Superclass handles the data_path override and DataLoader creation
         super(REC_Processor_OnTheFly, self).load_data()
