@@ -1,0 +1,61 @@
+work_dir: /kaggle/working/resnet_ontheflyv17_CS_A100
+
+# feeder
+# Dùng --npz_path và --rgb_path khi chạy để override đường dẫn
+feeder: feeder.feeder_ntu_fused_ctr_resnet.Feeder
+train_feeder_args:
+  npz_path: /kaggle/input/ntu60/NTU60_CS_CLEAN.npz
+  rgb_path: /kaggle/input/ntu60/ntu_rgbd_fivefs.zip
+  label_path: train
+  split: CS
+  time_steps: 64
+  temporal_rgb_frames: 5
+  random_flip: True
+  random_choose: True
+
+test_feeder_args:
+  npz_path: /kaggle/input/ntu60/NTU60_CS_CLEAN.npz
+  rgb_path: /kaggle/input/ntu60/ntu_rgbd_fivefs.zip
+  label_path: val
+  split: CS
+  time_steps: 64
+  temporal_rgb_frames: 5
+
+# model — V17 NTU-60 CS
+model: models.resnet_ctrgcn_ontheflyv17.Model
+model_args:
+  resnet_args:
+    num_class: 60
+    pretrained: True
+    consistency_weight: 0.1
+    sp_feat_channels: 4
+    init_sigma_sharp: 3.0
+    init_sigma_coarse: 8.0
+    init_temp_sharp: 0.3
+    init_temp_coarse: 1.5
+    num_point: 25
+    num_person: 2
+  gcn_weights: ./result/ntu/ntu_gcn_xsub.pt
+  gcn_args:
+    num_class: 60
+    num_point: 25
+    num_person: 2
+    graph: graph.ntu_rgb_d.Graph
+    graph_args:
+      labeling_mode: "spatial"
+
+# optim — lr scaled linearly: 0.005 * (128/32) = 0.02
+weight_decay: 0.0001
+base_lr: 0.02
+lr_scheduler: cosine
+warmup_epochs: 10        # warmup dài hơn vì batch lớn
+step: [30, 60]
+
+# training — A100 40GB, ~152MB VRAM/sample → batch 128 dùng ~22GB
+device: [0]
+batch_size: 128
+test_batch_size: 256     # eval không cần gradient → dùng gấp đôi
+num_worker: 4
+num_epoch: 80
+eval_interval: 1
+label_smoothing: 0.1
