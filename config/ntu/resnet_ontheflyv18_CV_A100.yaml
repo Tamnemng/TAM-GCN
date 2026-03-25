@@ -1,0 +1,55 @@
+work_dir: /kaggle/working/resnet_ontheflyv18_CV_A100
+
+# feeder
+feeder: feeder.feeder_ntu_fused_ctr_resnet.Feeder
+train_feeder_args:
+  npz_path: /kaggle/input/ntu60/NTU60_CV_CLEAN.npz
+  rgb_path: /kaggle/input/ntu60/ntu_rgbd_fivefs.zip
+  label_path: train
+  split: CV
+  time_steps: 64
+  temporal_rgb_frames: 5
+  random_flip: True
+  random_choose: True
+
+test_feeder_args:
+  npz_path: /kaggle/input/ntu60/NTU60_CV_CLEAN.npz
+  rgb_path: /kaggle/input/ntu60/ntu_rgbd_fivefs.zip
+  label_path: val
+  split: CV
+  time_steps: 64
+  temporal_rgb_frames: 5
+
+# model — V18 NTU-60 CV (no spatial attention)
+model: models.resnet_ctrgcn_ontheflyv18.Model
+model_args:
+  resnet_args:
+    num_class: 60
+    pretrained: True
+    consistency_weight: 0.1
+    num_point: 25
+    num_person: 2
+  gcn_weights: ./result/ntu/ntu_gcn_xview.pt
+  gcn_args:
+    num_class: 60
+    num_point: 25
+    num_person: 2
+    graph: graph.ntu_rgb_d.Graph
+    graph_args:
+      labeling_mode: "spatial"
+
+# optim
+weight_decay: 0.0001
+base_lr: 0.02
+lr_scheduler: cosine
+warmup_epochs: 10
+step: [30, 60]
+
+# training
+device: [0]
+batch_size: 128
+test_batch_size: 256
+num_worker: 4
+num_epoch: 80
+eval_interval: 1
+label_smoothing: 0.1
