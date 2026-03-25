@@ -60,7 +60,6 @@ class Processor(IO):
         if 'debug' not in self.arg.train_feeder_args:
             self.arg.train_feeder_args['debug'] = self.arg.debug
         self.data_loader = dict()
-        self.arg.test_feeder_args['evaluation'] = True
         if self.arg.phase == 'train':
             self.data_loader['train'] = torch.utils.data.DataLoader(
                 dataset=Feeder(**self.arg.train_feeder_args),
