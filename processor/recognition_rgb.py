@@ -134,6 +134,7 @@ class REC_Processor(Processor):
             description='ResNet Only Processor')
 
         parser.add_argument('--base_lr', type=float, default=0.01, help='initial learning rate')
+        parser.add_argument('--lr_decay_rate', type=float, default=0.1, help='learning rate decay factor applied at each step epoch')
         parser.add_argument('--step', type=int, default=[], nargs='+', help='the epoch where optimizer reduce the learning rate')
         parser.add_argument('--optimizer', default='SGD', help='type of optimizer')
         parser.add_argument('--nesterov', type=str2bool, default=True, help='use nesterov or not')
