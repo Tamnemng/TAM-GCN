@@ -10,6 +10,16 @@ from .processor import Processor
 from torchlight import str2bool
 
 class REC_Processor(Processor):
+    def load_data(self):
+        # Match the on-the-fly CLI so RGB-only training can override rgb_path directly.
+        if getattr(self.arg, 'rgb_path', None) is not None:
+            if hasattr(self.arg, 'train_feeder_args') and isinstance(self.arg.train_feeder_args, dict):
+                self.arg.train_feeder_args['rgb_path'] = self.arg.rgb_path
+            if hasattr(self.arg, 'test_feeder_args') and isinstance(self.arg.test_feeder_args, dict):
+                self.arg.test_feeder_args['rgb_path'] = self.arg.rgb_path
+
+        super().load_data()
+
     def load_model(self):
         # Load model từ config
         self.model = self.io.load_model(self.arg.model, **self.arg.model_args)
@@ -133,6 +143,8 @@ class REC_Processor(Processor):
             parents=[parent_parser],
             description='ResNet Only Processor')
 
+        parser.add_argument('--rgb_path', type=str, default=None,
+                            help='override the rgb_path defined in config for both train and test feeder args')
         parser.add_argument('--base_lr', type=float, default=0.01, help='initial learning rate')
         parser.add_argument('--lr_decay_rate', type=float, default=0.1, help='learning rate decay factor applied at each step epoch')
         parser.add_argument('--warm_up_epoch', type=int, default=0, help='number of warm-up epochs')
